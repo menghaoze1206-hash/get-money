@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>基金估值看板</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <section class="hero">
+        <div>
+          <p class="eyebrow">Fund Value Tracker</p>
+          <h1>基金净值估算看板</h1>
+          <p class="hero-copy">
+            盘中按分钟刷新估值参考，收盘后可继续查看最近一次估算与官方净值。
+          </p>
+        </div>
+        <div class="hero-meta">
+          <span id="market-status" class="badge">准备中</span>
+          <span id="updated-at" class="subtle">等待首次刷新</span>
+        </div>
+      </section>
+
+      <section class="toolbar">
+        <form id="add-form" class="add-form">
+          <label class="sr-only" for="fund-code">基金代码</label>
+          <input id="fund-code" name="code" inputmode="numeric" placeholder="输入基金代码，例如 161725" maxlength="6" />
+          <button type="submit">添加</button>
+        </form>
+        <button id="refresh-btn" class="secondary">立即刷新</button>
+      </section>
+
+      <section>
+        <div id="message" class="message" hidden></div>
+        <div id="cards" class="cards"></div>
+      </section>
+    </main>
+    <script src="/app.js"></script>
+  </body>
+</html>
