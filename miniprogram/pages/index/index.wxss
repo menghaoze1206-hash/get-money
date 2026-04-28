@@ -1,0 +1,150 @@
+.page {
+  padding: 32rpx 24rpx 48rpx;
+}
+
+.header {
+  margin-bottom: 32rpx;
+}
+
+.header-tag {
+  font-size: 24rpx;
+  color: var(--gold);
+  margin-bottom: 12rpx;
+}
+
+.header-title {
+  font-size: 44rpx;
+  font-weight: 800;
+  line-height: 1.2;
+  margin-bottom: 8rpx;
+}
+
+.header-sub {
+  font-size: 26rpx;
+  color: var(--muted);
+}
+
+.signal-card {
+  margin-bottom: 32rpx;
+  padding: 48rpx 32rpx;
+  border-radius: 20rpx;
+  text-align: center;
+}
+
+.signal-card.buy {
+  background: linear-gradient(135deg, #e8f5e9, #c8e6c9);
+}
+
+.signal-card.hold {
+  background: linear-gradient(135deg, #fff3e0, #ffe0b2);
+}
+
+.signal-card.caution {
+  background: linear-gradient(135deg, #ffebee, #ffcdd2);
+}
+
+.signal-text {
+  font-size: 48rpx;
+  font-weight: 800;
+  margin-bottom: 12rpx;
+}
+
+.signal-card.buy .signal-text {
+  color: #2e7d32;
+}
+
+.signal-card.hold .signal-text {
+  color: #e65100;
+}
+
+.signal-card.caution .signal-text {
+  color: #c62828;
+}
+
+.signal-desc {
+  font-size: 26rpx;
+  color: var(--muted);
+  line-height: 1.6;
+}
+
+.metrics {
+  background: var(--card);
+  border-radius: 20rpx;
+  padding: 28rpx 24rpx;
+  margin-bottom: 24rpx;
+  box-shadow: 0 2rpx 20rpx rgba(0,0,0,0.04);
+}
+
+.metric-row {
+  display: flex;
+  justify-content: space-between;
+}
+
+.metric {
+  flex: 1;
+  text-align: center;
+  padding: 20rpx 0;
+}
+
+.metric-label {
+  font-size: 24rpx;
+  color: var(--muted);
+  margin-bottom: 12rpx;
+}
+
+.metric-value {
+  font-size: 40rpx;
+  font-weight: 700;
+}
+
+.metric-value.accent {
+  color: var(--gold);
+}
+
+.metric-value.muted {
+  color: var(--muted);
+  font-size: 32rpx;
+}
+
+.metric-divider {
+  height: 1rpx;
+  background: var(--line);
+  margin: 0 24rpx;
+}
+
+.verdict {
+  background: var(--card);
+  border-radius: 20rpx;
+  padding: 28rpx 24rpx;
+  margin-bottom: 24rpx;
+  box-shadow: 0 2rpx 20rpx rgba(0,0,0,0.04);
+}
+
+.verdict-title {
+  font-size: 28rpx;
+  font-weight: 700;
+  margin-bottom: 16rpx;
+}
+
+.verdict-text {
+  font-size: 26rpx;
+  color: var(--muted);
+  line-height: 1.8;
+}
+
+.footer {
+  text-align: center;
+  margin-top: 48rpx;
+}
+
+.footer-text {
+  font-size: 22rpx;
+  color: var(--muted);
+  line-height: 1.8;
+}
+
+.footer-text.warning {
+  margin-top: 12rpx;
+  color: var(--orange);
+  font-size: 24rpx;
+}

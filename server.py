@@ -8,12 +8,15 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib import error, parse, request
 
+import dividend
+
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
 WATCHLIST_FILE = DATA_DIR / "watchlist.json"
 STATIC_DIR = BASE_DIR / "static"
 PORT = 8765
+_watchlist_cache = None
 
 ESTIMATE_URL = "https://fundgz.1234567.com.cn/js/{code}.js"
 USER_AGENT = (
@@ -40,18 +43,24 @@ def ensure_data_dir() -> None:
         )
 
 
-def load_watchlist():
+def load_watchlist(force=False):
+    global _watchlist_cache
+    if _watchlist_cache is not None and not force:
+        return _watchlist_cache
     ensure_data_dir()
     raw = WATCHLIST_FILE.read_text(encoding="utf-8")
     items = json.loads(raw)
-    return items if isinstance(items, list) else []
+    _watchlist_cache = items if isinstance(items, list) else []
+    return _watchlist_cache
 
 
 def save_watchlist(items):
+    global _watchlist_cache
     ensure_data_dir()
     WATCHLIST_FILE.write_text(
         json.dumps(items, ensure_ascii=False, indent=2), encoding="utf-8"
     )
+    _watchlist_cache = items
 
 
 def fetch_estimate(code: str):
@@ -75,23 +84,13 @@ def fetch_estimate(code: str):
 
 class FundHandler(BaseHTTPRequestHandler):
     def do_HEAD(self):
-        parsed = parse.urlparse(self.path)
-        if parsed.path in ("", "/"):
-            path = "/index.html"
-        else:
-            path = parsed.path
-        full_path = (STATIC_DIR / path.lstrip("/")).resolve()
-        try:
-            full_path.relative_to(STATIC_DIR.resolve())
-        except ValueError:
-            self.send_error(HTTPStatus.FORBIDDEN)
-            return
-        if not full_path.exists() or not full_path.is_file():
-            self.send_error(HTTPStatus.NOT_FOUND)
+        full_path = self._resolve_static_path()
+        if full_path is None:
             return
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", self.guess_type(full_path.suffix))
         self.send_header("Content-Length", str(full_path.stat().st_size))
+        self.send_header("Cache-Control", "public, max-age=3600")
         self.end_headers()
 
     def do_GET(self):
@@ -124,7 +123,19 @@ class FundHandler(BaseHTTPRequestHandler):
                 self.respond_json(data)
             return
 
-        self.serve_static(parsed.path)
+        if parsed.path == "/api/dividend":
+            try:
+                data = dividend.fetch_dividend_analysis()
+            except Exception as exc:
+                self.respond_json(
+                    {"error": f"获取红利数据失败: {exc}"},
+                    status=HTTPStatus.BAD_GATEWAY,
+                )
+            else:
+                self.respond_json(data)
+            return
+
+        self.serve_static()
 
     def do_POST(self):
         parsed = parse.urlparse(self.path)
@@ -148,13 +159,12 @@ class FundHandler(BaseHTTPRequestHandler):
             return
 
         items = load_watchlist()
-        if any(item.get("code") == code for item in items):
-            self.respond_json({"items": items})
-            return
+        existing = any(item.get("code") == code for item in items)
+        if not existing:
+            items.append({"code": code, "name": estimate.get("name") or code})
+            save_watchlist(items)
 
-        items.append({"code": code, "name": estimate.get("name") or code})
-        save_watchlist(items)
-        self.respond_json({"items": items}, status=HTTPStatus.CREATED)
+        self.respond_json({"items": items, "added": estimate}, status=HTTPStatus.CREATED)
 
     def do_DELETE(self):
         parsed = parse.urlparse(self.path)
@@ -178,18 +188,9 @@ class FundHandler(BaseHTTPRequestHandler):
         body = self.rfile.read(content_length).decode("utf-8") if content_length else "{}"
         return json.loads(body or "{}")
 
-    def serve_static(self, path: str):
-        if path in ("", "/"):
-            path = "/index.html"
-        full_path = (STATIC_DIR / path.lstrip("/")).resolve()
-        try:
-            full_path.relative_to(STATIC_DIR.resolve())
-        except ValueError:
-            self.respond_json({"error": "非法路径"}, status=HTTPStatus.FORBIDDEN)
-            return
-
-        if not full_path.exists() or not full_path.is_file():
-            self.respond_json({"error": "Not Found"}, status=HTTPStatus.NOT_FOUND)
+    def serve_static(self):
+        full_path = self._resolve_static_path()
+        if full_path is None:
             return
 
         content_type = self.guess_type(full_path.suffix)
@@ -197,8 +198,25 @@ class FundHandler(BaseHTTPRequestHandler):
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "public, max-age=3600")
         self.end_headers()
         self.wfile.write(data)
+
+    def _resolve_static_path(self):
+        parsed = parse.urlparse(self.path)
+        path = parsed.path
+        if path in ("", "/"):
+            path = "/index.html"
+        full_path = (STATIC_DIR / path.lstrip("/")).resolve()
+        try:
+            full_path.relative_to(STATIC_DIR.resolve())
+        except ValueError:
+            self.respond_json({"error": "非法路径"}, status=HTTPStatus.FORBIDDEN)
+            return None
+        if not full_path.exists() or not full_path.is_file():
+            self.respond_json({"error": "Not Found"}, status=HTTPStatus.NOT_FOUND)
+            return None
+        return full_path
 
     def respond_json(self, payload, status=HTTPStatus.OK):
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")

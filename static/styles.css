@@ -1,6 +1,7 @@
 :root {
   color-scheme: light;
   --bg: #f4f7fb;
+  --gradient-start: #f7faff;
   --panel: #ffffff;
   --panel-alt: #eef3ff;
   --text: #0f172a;
@@ -9,6 +10,14 @@
   --green: #0f9f6e;
   --red: #d13f4c;
   --blue: #2563eb;
+  --danger: #be123c;
+  --danger-bg: #fff1f2;
+  --chart-bg: #f8fbff;
+  --chart-line: #e1e9f6;
+  --chart-grid: #dbe4f0;
+  --message-bg: #fff4e5;
+  --message-border: #f4d7a6;
+  --message-text: #9a6700;
   --shadow: 0 10px 30px rgba(15, 23, 42, 0.08);
 }
 
@@ -19,7 +28,7 @@
 body {
   margin: 0;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  background: linear-gradient(180deg, #f7faff 0%, var(--bg) 100%);
+  background: linear-gradient(180deg, var(--gradient-start) 0%, var(--bg) 100%);
   color: var(--text);
 }
 
@@ -127,10 +136,10 @@ button.secondary {
 .message {
   margin-bottom: 16px;
   padding: 12px 14px;
-  background: #fff4e5;
-  border: 1px solid #f4d7a6;
+  background: var(--message-bg);
+  border: 1px solid var(--message-border);
   border-radius: 8px;
-  color: #9a6700;
+  color: var(--message-text);
 }
 
 .cards {
@@ -189,8 +198,8 @@ button.secondary {
 .chart-panel {
   margin-top: 18px;
   padding: 14px;
-  background: #f8fbff;
-  border: 1px solid #e1e9f6;
+  background: var(--chart-bg);
+  border: 1px solid var(--chart-line);
   border-radius: 8px;
 }
 
@@ -216,7 +225,7 @@ button.secondary {
 }
 
 .chart-grid {
-  stroke: #dbe4f0;
+  stroke: var(--chart-grid);
   stroke-width: 1;
 }
 
@@ -298,8 +307,8 @@ button.secondary {
   height: 36px;
   padding: 0 12px;
   font-size: 14px;
-  background: #fff1f2;
-  color: #be123c;
+  background: var(--danger-bg);
+  color: var(--danger);
 }
 
 .sr-only {

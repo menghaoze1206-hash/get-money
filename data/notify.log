@@ -1,0 +1,19 @@
+开始检查基金均线... 2026-04-28 02:24:50
+  检查 红利低波ETF(512890) 失败: Remote end closed connection without response
+  检查 红利低波100(515080) 失败: Remote end closed connection without response
+  检查 自由现金流ETF(159201) 失败: Remote end closed connection without response
+企业微信通知发送异常: 'ascii' codec can't encode characters in position 31-39: ordinal not in range(128)
+检查完成
+开始检查基金均线... 2026-04-28 02:33:52
+  检查 红利低波ETF(512890) 失败: Remote end closed connection without response
+  检查 红利低波100(515080) 失败: Remote end closed connection without response
+  检查 自由现金流ETF(159201) 失败: Remote end closed connection without response
+企业微信通知发送失败: {'errcode': 93000, 'errmsg': 'invalid webhook url, hint: [1777314832016362480254932], from ip: 221.221.152.171, more info at https://open.work.weixin.qq.com/devtool/query?e=93000'}
+检查完成
+开始检查基金均线... 2026-04-28 02:34:11
+  检查 红利低波ETF(512890) 失败: Remote end closed connection without response
+  检查 红利低波100(515080) 失败: Remote end closed connection without response
+  检查 自由现金流ETF(159201) 失败: Remote end closed connection without response
+企业微信通知发送失败: {'errcode': 93000, 'errmsg': 'invalid webhook url, hint: [1777314851390121791596385], from ip: 221.221.152.171, more info at https://open.work.weixin.qq.com/devtool/query?e=93000'}
+检查完成
+今天已经发送过通知，跳过
