@@ -18,9 +18,12 @@ USER_AGENT = (
 
 # 监控的基金列表
 WATCH_FUNDS = [
-    {"name": "红利低波ETF", "code": "512890", "market": "1"},  # 上交所
-    {"name": "红利低波100", "code": "515080", "market": "1"},  # 上交所
-    {"name": "自由现金流ETF", "code": "159201", "market": "0"},  # 深交所
+    # ETF（场内基金）- 使用K线数据
+    {"name": "红利低波ETF", "code": "512890", "market": "1"},
+    {"name": "红利低波100", "code": "515080", "market": "1"},
+    {"name": "自由现金流ETF", "code": "159201", "market": "0"},
+    # 场外基金 - 使用净值数据
+    {"name": "南方红利低波联接A", "code": "008163", "type": "fund"},
 ]
 
 # 通知方式配置
@@ -125,11 +128,38 @@ SIGNAL_MAP = {
 }
 
 
-def check_fund(fund):
-    """检查单个基金 - 结合MA20/MA60给出分级买入信号"""
-    klines = fetch_kline(fund)
-    closes = parse_kline(klines)
+def fetch_fund_nav(code):
+    """获取场外基金净值历史（最近80个交易日），返回净值列表（从旧到新）"""
+    JZ_URL = "https://api.fund.eastmoney.com/f10/lsjz"
+    headers = {
+        "User-Agent": USER_AGENT,
+        "Referer": f"https://fundf10.eastmoney.com/jjjz_{code}.html",
+    }
 
+    all_entries = []
+    # API 每页最多20条，分4页获取80条
+    for page in range(1, 5):
+        url = f"{JZ_URL}?fundCode={code}&pageIndex={page}&pageSize=20"
+        req = request.Request(url, headers=headers)
+        with request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        entries = data.get("Data", {}).get("LSJZList", [])
+        if not entries:
+            break
+        all_entries.extend(entries)
+
+    if not all_entries:
+        raise ValueError(f"无法获取基金 {code} 的净值数据")
+
+    # API 返回从新到旧，反转为从旧到新
+    navs = []
+    for e in reversed(all_entries):
+        navs.append(float(e["DWJZ"]))
+    return navs
+
+
+def analyze(closes, fund):
+    """分析价格/净值序列，结合MA20/MA60给出分级买入信号"""
     if len(closes) < 60:
         return {
             "name": fund["name"],
@@ -155,10 +185,9 @@ def check_fund(fund):
         else:
             signal = "light_buy"
     elif not trend_up and current_price < ma20:
-        # 趋势向下 + 低于均线，可能是下跌中继，分级显示
         below_pct = abs(diff_pct)
         if below_pct >= 4:
-            signal = "light_buy"  # 大幅偏离时轻仓试探，但风险较高
+            signal = "light_buy"
         else:
             signal = "hold"
     elif current_price < ma20 and abs(diff_pct) < 1:
@@ -176,6 +205,19 @@ def check_fund(fund):
         "diff_pct": round(diff_pct, 2),
         "trend_up": trend_up,
     }
+
+
+def check_fund(fund):
+    """检查单个基金 - 支持ETF(场内)和场外基金"""
+    fund_type = fund.get("type", "etf")
+
+    if fund_type == "fund":
+        navs = fetch_fund_nav(fund["code"])
+        return analyze(navs, fund)
+    else:
+        klines = fetch_kline(fund)
+        closes = parse_kline(klines)
+        return analyze(closes, fund)
 
 
 def send_pushplus(title, content):
