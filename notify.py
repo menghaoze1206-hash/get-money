@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""基金均线提醒工具 - 每天检查基金是否低于20日均线，低于则通过微信通知"""
+"""基金均线提醒工具 - 结合20日/60日均线，分级判断买入信号并通过微信通知"""
 
 import json
 import os
@@ -61,18 +61,18 @@ def get_akshare():
 
 
 def fetch_kline(fund):
-    """获取基金/ETF的K线数据（最近30个交易日）"""
+    """获取基金/ETF的K线数据（最近80个交易日，用于计算MA20和MA60）"""
     code = fund["code"]
     ak = get_akshare()
-    
+
     if ak:
         # 使用 akshare
         symbol = f"sh{code}" if fund["market"] == "1" else f"sz{code}"
         df = ak.stock_zh_index_daily(symbol=symbol)
         if df is None or df.empty:
             raise ValueError(f"无法获取 {fund['name']}({code}) 的数据")
-        # 取最近30天
-        df = df.tail(30)
+        # 取最近80天（足够计算MA60）
+        df = df.tail(80)
         # 格式: "日期,开盘,收盘,最低,最高,成交量"
         klines = []
         for _, row in df.iterrows():
@@ -89,7 +89,7 @@ def fetch_kline(fund):
             f"?secid={market}.{code}"
             f"&fields1=f1,f2,f3,f4,f5,f6"
             f"&fields2=f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61"
-            f"&klt=101&fqt=0&end=20500101&lmt=30"
+            f"&klt=101&fqt=0&end=20500101&lmt=80"
         )
         data = fetch_json(url)
         klines = (data.get("data") or {}).get("klines", [])
@@ -115,31 +115,66 @@ def calc_ma(closes, n=20):
     return sum(closes[-n:]) / n
 
 
+SIGNAL_MAP = {
+    "strong_buy": {"label": "重仓买入", "color": "red", "icon": "🔴"},
+    "buy": {"label": "建议买入", "color": "orange", "icon": "🟠"},
+    "light_buy": {"label": "可轻仓", "color": "warning", "icon": "🟡"},
+    "hold": {"label": "观望", "color": "info", "icon": "⚪"},
+    "no_buy": {"label": "暂不买入", "color": "green", "icon": "❌"},
+    "insufficient_data": {"label": "数据不足", "color": "gray", "icon": "⚠️"},
+}
+
+
 def check_fund(fund):
-    """检查单个基金是否可以购买"""
+    """检查单个基金 - 结合MA20/MA60给出分级买入信号"""
     klines = fetch_kline(fund)
     closes = parse_kline(klines)
-    
-    if len(closes) < 20:
+
+    if len(closes) < 60:
         return {
             "name": fund["name"],
             "code": fund["code"],
-            "can_buy": False,
-            "reason": "数据不足20个交易日",
+            "signal": "insufficient_data",
+            "reason": f"数据不足60个交易日(当前{len(closes)}天)",
         }
-    
+
     current_price = closes[-1]
     ma20 = calc_ma(closes, 20)
-    can_buy = current_price < ma20
-    
+    ma60 = calc_ma(closes, 60)
+
+    diff_pct = (current_price - ma20) / ma20 * 100
+    trend_up = current_price > ma60
+
+    # 分级信号判断：趋势向上(price > MA60) + 价格低于MA20时触发买入
+    if trend_up and current_price < ma20:
+        below_pct = abs(diff_pct)
+        if below_pct >= 4:
+            signal = "strong_buy"
+        elif below_pct >= 2:
+            signal = "buy"
+        else:
+            signal = "light_buy"
+    elif not trend_up and current_price < ma20:
+        # 趋势向下 + 低于均线，可能是下跌中继，分级显示
+        below_pct = abs(diff_pct)
+        if below_pct >= 4:
+            signal = "light_buy"  # 大幅偏离时轻仓试探，但风险较高
+        else:
+            signal = "hold"
+    elif current_price < ma20 and abs(diff_pct) < 1:
+        signal = "hold"
+    else:
+        signal = "no_buy"
+
     return {
         "name": fund["name"],
         "code": fund["code"],
         "current_price": round(current_price, 3),
         "ma20": round(ma20, 3),
-        "can_buy": can_buy,
-        "diff": round(current_price - ma20, 3),
-        "diff_pct": round((current_price - ma20) / ma20 * 100, 2),
+        "ma60": round(ma60, 3),
+        "signal": signal,
+        "diff_pct": round(diff_pct, 2),
+        "trend_up": trend_up,
     }
 
 
@@ -186,47 +221,50 @@ def send_wecom(title, results):
     if not WECOM_KEY:
         print("错误: 未设置 WECOM_KEY 环境变量")
         return False
-    
+
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
-    buy_count = sum(1 for r in results if r.get("can_buy"))
-    
+    buy_signals = {"strong_buy", "buy", "light_buy"}
+    buy_count = sum(1 for r in results if r.get("signal") in buy_signals)
+
     # 构建 markdown 消息
     lines = [f"## 基金均线提醒 - {now}\n"]
-    
+
     for r in results:
         name = r["name"]
         code = r["code"]
-        can_buy = r.get("can_buy", False)
-        
+        signal = r.get("signal", "no_buy")
+        info = SIGNAL_MAP.get(signal, SIGNAL_MAP["no_buy"])
+
         if "reason" in r:
             lines.append(f"**{name}({code})**\n> ⚠️ {r['reason']}\n")
         else:
             price = r["current_price"]
             ma20 = r["ma20"]
+            ma60 = r["ma60"]
             diff_pct = r["diff_pct"]
-            
-            if can_buy:
-                status = "<font color='red'>✅ 可购买</font>"
-            else:
-                status = "<font color='green'>❌ 不购买</font>"
-            
+            trend_up = r["trend_up"]
+
+            status = f"<font color='{info['color']}'>{info['icon']} {info['label']}</font>"
             direction = "低于" if diff_pct < 0 else "高于"
+            trend_text = "↑ 向上" if trend_up else "↓ 向下"
+
             lines.append(
                 f"**{name}({code})** {status}\n"
-                f"> 当前价格: {price}，20日均线: {ma20}\n"
-                f"> {direction}均线 {abs(diff_pct)}%\n"
+                f"> 当前价格: {price}\n"
+                f"> MA20: {ma20}，MA60: {ma60}\n"
+                f"> {direction}MA20 {abs(diff_pct)}%，趋势: {trend_text}\n"
             )
-    
-    lines.append(f"---\n**今日共 {buy_count} 个基金可购买**")
-    
+
+    lines.append(f"---\n**今日共 {buy_count} 个基金触发买入信号**")
+
     payload = {
         "msgtype": "markdown",
         "markdown": {"content": "\n".join(lines)},
     }
-    
+
     url = f"{WECOM_WEBHOOK}?key={WECOM_KEY}"
     data = json.dumps(payload).encode("utf-8")
-    
+
     req = request.Request(
         url,
         data=data,
@@ -236,7 +274,7 @@ def send_wecom(title, results):
         },
         method="POST",
     )
-    
+
     try:
         with request.urlopen(req, timeout=10) as resp:
             result = json.loads(resp.read().decode("utf-8"))
@@ -255,35 +293,41 @@ def build_message(results):
     """构建通知消息（返回 HTML 格式供 PushPlus 使用）"""
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
     lines = [f"<h3>基金均线提醒 - {now}</h3>", "<hr>"]
-    
-    buy_count = sum(1 for r in results if r.get("can_buy"))
-    
+
+    buy_signals = {"strong_buy", "buy", "light_buy"}
+    buy_count = sum(1 for r in results if r.get("signal") in buy_signals)
+
     for r in results:
         name = r["name"]
         code = r["code"]
-        can_buy = r.get("can_buy", False)
-        
+        signal = r.get("signal", "no_buy")
+        info = SIGNAL_MAP.get(signal, SIGNAL_MAP["no_buy"])
+
         if "reason" in r:
             status = f"<span style='color:gray'>⚠️ {r['reason']}</span>"
             detail = ""
         else:
             price = r["current_price"]
             ma20 = r["ma20"]
+            ma60 = r["ma60"]
             diff_pct = r["diff_pct"]
-            
-            if can_buy:
-                status = "<span style='color:red;font-weight:bold'>✅ 可购买</span>"
-            else:
-                status = "<span style='color:green'>❌ 不购买</span>"
-            
+            trend_up = r["trend_up"]
+
+            color = info["color"]
+            status = f"<span style='color:{color};font-weight:bold'>{info['icon']} {info['label']}</span>"
             direction = "低于" if diff_pct < 0 else "高于"
-            detail = f"<br>当前价格: {price}，20日均线: {ma20}，{direction}均线 {abs(diff_pct)}%"
-        
+            trend_text = "↑ 向上" if trend_up else "↓ 向下"
+            detail = (
+                f"<br>当前价格: {price}"
+                f"<br>MA20: {ma20}，MA60: {ma60}"
+                f"<br>{direction}MA20 {abs(diff_pct)}%，趋势: {trend_text}"
+            )
+
         lines.append(f"<p><b>{name}({code})</b> - {status}{detail}</p>")
-    
+
     lines.append("<hr>")
-    lines.append(f"<p>今日共 {buy_count} 个基金可购买</p>")
-    
+    lines.append(f"<p>今日共 {buy_count} 个基金触发买入信号</p>")
+
     return "\n".join(lines)
 
 
@@ -342,13 +386,13 @@ def main():
         try:
             result = check_fund(fund)
             results.append(result)
-            print(f"  {result['name']}({result['code']}): 可购买={result.get('can_buy', False)}")
+            print(f"  {result['name']}({result['code']}): 信号={result.get('signal', 'unknown')}")
         except Exception as e:
             print(f"  检查 {fund['name']}({fund['code']}) 失败: {e}")
             results.append({
                 "name": fund["name"],
                 "code": fund["code"],
-                "can_buy": False,
+                "signal": "insufficient_data",
                 "reason": f"获取数据失败: {e}",
             })
     
