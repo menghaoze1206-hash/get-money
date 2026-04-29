@@ -119,14 +119,57 @@ def calc_ma(closes, n=20):
     return sum(closes[-n:]) / n
 
 
-SIGNAL_MAP = {
-    "strong_buy": {"label": "重仓买入", "color": "red", "icon": "🔴"},
-    "buy": {"label": "建议买入", "color": "orange", "icon": "🟠"},
-    "light_buy": {"label": "可轻仓", "color": "warning", "icon": "🟡"},
-    "hold": {"label": "观望", "color": "info", "icon": "⚪"},
-    "no_buy": {"label": "暂不买入", "color": "green", "icon": "❌"},
-    "insufficient_data": {"label": "数据不足", "color": "gray", "icon": "⚠️"},
-}
+def multiplier_label(mult):
+    """映射定投倍数到显示信息"""
+    if mult >= 2.0:
+        return ("#ff0000", "🔥 大幅加码")
+    elif mult >= 1.6:
+        return ("#ff6600", "🟠 加码买入")
+    elif mult >= 1.3:
+        return ("#e6a817", "🟡 适度多投")
+    elif mult >= 1.0:
+        return ("#666666", "⚪ 标准定投")
+    elif mult >= 0.7:
+        return ("#3366cc", "🔵 减少投入")
+    elif mult >= 0.5:
+        return ("#339933", "🟢 轻仓观望")
+    else:
+        return ("#999999", "⏸️ 暂缓投入")
+
+
+def calc_multiplier(diff_pct, trend_up, thresholds):
+    """根据偏离和趋势计算定投倍数"""
+    light_t, buy_t, strong_t = thresholds
+
+    if trend_up:
+        if diff_pct < 0:  # 低于MA20，多投
+            below_pct = abs(diff_pct)
+            if strong_t and below_pct >= strong_t:
+                return 2.0
+            elif below_pct >= buy_t:
+                return 1.6
+            elif below_pct >= light_t:
+                return 1.3
+            else:
+                return 1.0
+        else:  # 高于MA20，少投
+            if diff_pct >= light_t:
+                return 0.4
+            elif diff_pct >= light_t * 0.5:
+                return 0.6
+            else:
+                return 0.8
+    else:  # 趋势向下，控制仓位
+        if diff_pct < 0:
+            below_pct = abs(diff_pct)
+            if strong_t and below_pct >= strong_t:
+                return 1.0
+            elif below_pct >= buy_t:
+                return 0.8
+            else:
+                return 0.7
+        else:
+            return 0.5
 
 
 def fetch_fund_nav(code):
@@ -160,12 +203,12 @@ def fetch_fund_nav(code):
 
 
 def analyze(closes, fund):
-    """分析价格/净值序列，结合MA20/MA60给出分级买入信号"""
+    """分析价格/净值序列，结合MA20/MA60给出定投倍数建议"""
     if len(closes) < 60:
         return {
             "name": fund["name"],
             "code": fund["code"],
-            "signal": "insufficient_data",
+            "multiplier": 0,
             "reason": f"数据不足60个交易日(当前{len(closes)}天)",
         }
 
@@ -176,31 +219,8 @@ def analyze(closes, fund):
     diff_pct = (current_price - ma20) / ma20 * 100
     trend_up = current_price > ma60
     t = fund.get("thresholds", (2.0, 4.0, None))
-    light_t, buy_t, strong_t = t
-
-    # 分级信号判断：趋势向上(price > MA60) + 价格低于MA20时触发买入
-    if trend_up and current_price < ma20:
-        below_pct = abs(diff_pct)
-        if strong_t and below_pct >= strong_t:
-            signal = "strong_buy"
-        elif below_pct >= buy_t:
-            signal = "buy"
-        elif below_pct >= light_t:
-            signal = "light_buy"
-        else:
-            signal = "hold"
-    elif not trend_up and current_price < ma20:
-        below_pct = abs(diff_pct)
-        if strong_t and below_pct >= strong_t:
-            signal = "light_buy"
-        elif below_pct >= buy_t:
-            signal = "hold"
-        else:
-            signal = "hold"
-    elif current_price < ma20 and abs(diff_pct) < light_t:
-        signal = "hold"
-    else:
-        signal = "no_buy"
+    mult = calc_multiplier(diff_pct, trend_up, t)
+    color, action = multiplier_label(mult)
 
     return {
         "name": fund["name"],
@@ -208,9 +228,11 @@ def analyze(closes, fund):
         "current_price": round(current_price, 3),
         "ma20": round(ma20, 3),
         "ma60": round(ma60, 3),
-        "signal": signal,
         "diff_pct": round(diff_pct, 2),
         "trend_up": trend_up,
+        "multiplier": mult,
+        "action": action,
+        "action_color": color,
     }
 
 
@@ -272,17 +294,15 @@ def send_wecom(title, results):
         return False
 
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
-    buy_signals = {"strong_buy", "buy", "light_buy"}
-    buy_count = sum(1 for r in results if r.get("signal") in buy_signals)
 
     # 构建 markdown 消息
     lines = [f"## 基金均线提醒 - {now}\n"]
+    lines.append("> 每日定投倍数建议\n")
 
     for r in results:
         name = r["name"]
         code = r["code"]
-        signal = r.get("signal", "no_buy")
-        info = SIGNAL_MAP.get(signal, SIGNAL_MAP["no_buy"])
+        mult = r.get("multiplier", 1.0)
 
         if "reason" in r:
             lines.append(f"**{name}({code})**\n> ⚠️ {r['reason']}\n")
@@ -292,19 +312,22 @@ def send_wecom(title, results):
             ma60 = r["ma60"]
             diff_pct = r["diff_pct"]
             trend_up = r["trend_up"]
+            action = r.get("action", "")
+            action_color = r.get("action_color", "#666666")
 
-            status = f"<font color='{info['color']}'>{info['icon']} {info['label']}</font>"
+            status = f"<font color='{action_color}'>{action}</font>"
             direction = "低于" if diff_pct < 0 else "高于"
             trend_text = "↑ 向上" if trend_up else "↓ 向下"
 
             lines.append(
-                f"**{name}({code})** {status}\n"
-                f"> 当前价格: {price}\n"
-                f"> MA20: {ma20}，MA60: {ma60}\n"
-                f"> {direction}MA20 {abs(diff_pct)}%，趋势: {trend_text}\n"
+                f"**{name}({code})**\n"
+                f"> {status}\n"
+                f"> 定投倍数: **{mult}x** | 当前: {price}\n"
+                f"> MA20: {ma20}  MA60: {ma60}\n"
+                f"> {direction}MA20 {abs(diff_pct)}%  趋势: {trend_text}\n"
             )
 
-    lines.append(f"---\n**今日共 {buy_count} 个基金触发买入信号**")
+    lines.append(f"---\n定投倍数 >1 加码，=1 标准，<1 减少")
 
     payload = {
         "msgtype": "markdown",
@@ -341,16 +364,12 @@ def send_wecom(title, results):
 def build_message(results):
     """构建通知消息（返回 HTML 格式供 PushPlus 使用）"""
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
-    lines = [f"<h3>基金均线提醒 - {now}</h3>", "<hr>"]
-
-    buy_signals = {"strong_buy", "buy", "light_buy"}
-    buy_count = sum(1 for r in results if r.get("signal") in buy_signals)
+    lines = [f"<h3>基金均线提醒 - {now}</h3>", "<p>每日定投倍数建议</p>", "<hr>"]
 
     for r in results:
         name = r["name"]
         code = r["code"]
-        signal = r.get("signal", "no_buy")
-        info = SIGNAL_MAP.get(signal, SIGNAL_MAP["no_buy"])
+        mult = r.get("multiplier", 1.0)
 
         if "reason" in r:
             status = f"<span style='color:gray'>⚠️ {r['reason']}</span>"
@@ -361,21 +380,22 @@ def build_message(results):
             ma60 = r["ma60"]
             diff_pct = r["diff_pct"]
             trend_up = r["trend_up"]
+            action = r.get("action", "")
+            action_color = r.get("action_color", "#666666")
 
-            color = info["color"]
-            status = f"<span style='color:{color};font-weight:bold'>{info['icon']} {info['label']}</span>"
+            status = f"<span style='color:{action_color};font-weight:bold'>{action}</span>"
             direction = "低于" if diff_pct < 0 else "高于"
             trend_text = "↑ 向上" if trend_up else "↓ 向下"
             detail = (
-                f"<br>当前价格: {price}"
-                f"<br>MA20: {ma20}，MA60: {ma60}"
-                f"<br>{direction}MA20 {abs(diff_pct)}%，趋势: {trend_text}"
+                f"<br>定投倍数: <b>{mult}x</b> | 当前: {price}"
+                f"<br>MA20: {ma20}  MA60: {ma60}"
+                f"<br>{direction}MA20 {abs(diff_pct)}%  趋势: {trend_text}"
             )
 
         lines.append(f"<p><b>{name}({code})</b> - {status}{detail}</p>")
 
     lines.append("<hr>")
-    lines.append(f"<p>今日共 {buy_count} 个基金触发买入信号</p>")
+    lines.append("<p>定投倍数 >1 加码，=1 标准，<1 减少</p>")
 
     return "\n".join(lines)
 
@@ -397,13 +417,13 @@ def main():
         try:
             result = check_fund(fund)
             results.append(result)
-            print(f"  {result['name']}({result['code']}): 信号={result.get('signal', 'unknown')}")
+            print(f"  {result['name']}({result['code']}): {result.get('multiplier', 0)}x {result.get('action', '')}")
         except Exception as e:
             print(f"  检查 {fund['name']}({fund['code']}) 失败: {e}")
             results.append({
                 "name": fund["name"],
                 "code": fund["code"],
-                "signal": "insufficient_data",
+                "multiplier": 0,
                 "reason": f"获取数据失败: {e}",
             })
     
