@@ -214,24 +214,25 @@ def fetch_index_valuation(index_name):
 
 
 def apply_valuation_modifier(mult, valuation):
-    """根据PE百分位调整定投倍数（股息率止盈逻辑）"""
+    """根据股息率调整定投倍数（股息率止盈逻辑）"""
     if not valuation:
         return mult
 
-    pe_pct = valuation.get("pe_pct")
-    if pe_pct is None:
+    yld = valuation.get("yield_pct")
+    if yld is None:
         return mult
 
-    if pe_pct > 0.9:
-        return 0  # 极度高估，停止定投
-    elif pe_pct > 0.8:
-        return round(mult * 0.5, 1)  # 高估，减半
-    elif pe_pct > 0.7:
-        return round(mult * 0.7, 1)  # 偏高，减少
-    elif pe_pct < 0.2:
-        return round(mult * 1.5, 1)  # 极度低估，加码
-    elif pe_pct < 0.3:
-        return round(mult * 1.3, 1)  # 低估，加码
+    # 股息率越低=价格越贵，股息率越高=价格越便宜
+    if yld < 3.5:
+        return 0  # 股息率极低，停止定投
+    elif yld < 4.0:
+        return round(mult * 0.5, 1)  # 偏贵，减半
+    elif yld < 4.5:
+        return round(mult * 0.7, 1)  # 略贵，减少
+    elif yld > 6.5:
+        return round(mult * 1.5, 1)  # 股息率极高，加码
+    elif yld > 5.5:
+        return round(mult * 1.3, 1)  # 便宜，加码
 
     return mult
 
@@ -394,7 +395,9 @@ def send_wecom(title, results):
             val_info = ""
             if r.get("valuation"):
                 v = r["valuation"]
-                val_info = f"\n> PE: {v['pe']}  PE分位: {v['pe_pct']*100:.0f}%  股息率: {v['yield_pct']}%"
+                yld = v["yield_pct"]
+                level = "极低" if yld < 3.5 else ("偏低" if yld < 4.5 else ("合理" if yld < 5.5 else "便宜"))
+                val_info = f"\n> 股息率: {yld}%({level})  PB: {v['pb']}"
 
             lines.append(
                 f"**{name}({code})**\n"
@@ -404,7 +407,7 @@ def send_wecom(title, results):
                 f"> {direction}MA20 {abs(diff_pct)}%  趋势: {trend_text}{val_info}\n"
             )
 
-    lines.append(f"---\n定投倍数 >1 加码，=1 标准，<1 减少 | 止盈暂停=0")
+    lines.append(f"---\n>1 加码 =1 标准 <1 减少 | 股息率<3.5%止盈")
 
     payload = {
         "msgtype": "markdown",
@@ -466,7 +469,9 @@ def build_message(results):
             val_html = ""
             if r.get("valuation"):
                 v = r["valuation"]
-                val_html = f"<br>PE: {v['pe']}  PE分位: {v['pe_pct']*100:.0f}%  股息率: {v['yield_pct']}%"
+                yld = v["yield_pct"]
+                level = "极低" if yld < 3.5 else ("偏低" if yld < 4.5 else ("合理" if yld < 5.5 else "便宜"))
+                val_html = f"<br>股息率: {yld}%({level})  PB: {v['pb']}"
 
             detail = (
                 f"<br>定投倍数: <b>{mult}x</b> | 当前: {price}"
