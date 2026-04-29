@@ -9,8 +9,6 @@ from pathlib import Path
 from urllib import error, parse, request
 
 BASE_DIR = Path(__file__).resolve().parent
-DATA_DIR = BASE_DIR / "data"
-NOTIFY_CACHE = DATA_DIR / "notify_cache.json"
 USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0 Safari/537.36"
@@ -22,8 +20,6 @@ WATCH_FUNDS = [
     # ETF（场内基金）- 使用K线数据
     {"name": "红利低波ETF", "code": "512890", "market": "1",
      "thresholds": (1.0, 1.8, None)},
-    {"name": "红利低波100", "code": "515080", "market": "1",
-     "thresholds": (1.5, 2.5, 3.5)},
     {"name": "自由现金流ETF", "code": "159201", "market": "0",
      "thresholds": (2.0, 4.0, 6.0)},
     # 场外基金 - 使用净值数据
@@ -392,46 +388,8 @@ def send_notification(title, content, results):
         return send_pushplus(title, content)
 
 
-def load_cache():
-    """加载缓存"""
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    if not NOTIFY_CACHE.exists():
-        return {}
-    try:
-        return json.loads(NOTIFY_CACHE.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return {}
-
-
-def save_cache(cache):
-    """保存缓存"""
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    NOTIFY_CACHE.write_text(
-        json.dumps(cache, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
-
-
-def should_notify_today():
-    """检查今天是否已经发送过通知"""
-    cache = load_cache()
-    today = datetime.now().strftime("%Y-%m-%d")
-    return cache.get("last_notify_date") != today
-
-
-def mark_notified():
-    """标记今天已发送通知"""
-    cache = load_cache()
-    cache["last_notify_date"] = datetime.now().strftime("%Y-%m-%d")
-    save_cache(cache)
-
-
 def main():
     """主函数"""
-    # 检查是否需要发送通知（避免重复发送）
-    if not should_notify_today():
-        print("今天已经发送过通知，跳过")
-        return
-    
     print(f"开始检查基金均线... {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     
     results = []
@@ -453,9 +411,7 @@ def main():
     title = f"基金均线提醒 - {datetime.now().strftime('%m月%d日')}"
     content = build_message(results)
     
-    if send_notification(title, content, results):
-        mark_notified()
-    
+    send_notification(title, content, results)
     print("检查完成")
 
 
