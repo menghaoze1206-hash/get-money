@@ -3,6 +3,7 @@
 
 import json
 import os
+import re
 import sys
 from datetime import datetime, timedelta, timezone
 
@@ -220,24 +221,145 @@ def fetch_index_valuation(index_name):
         return None
 
 
-def calc_multiplier_by_yield(yield_pct):
-    """股息率决定加仓力度：便宜多投，贵了少投甚至不投"""
+# ETF分红缓存
+_etf_yield_cache = {}
+
+
+def fetch_etf_dividend_yield(etf_code):
+    """从ETF分红记录反推股息率，返回当前股息率和历史中位"""
+    if etf_code in _etf_yield_cache:
+        return _etf_yield_cache[etf_code]
+
+    # 1. 爬取分红页面
+    url = f"https://fundf10.eastmoney.com/fhsp_{etf_code}.html"
+    headers = {
+        "User-Agent": USER_AGENT,
+        "Referer": "https://fundf10.eastmoney.com/",
+    }
+    try:
+        req = request.Request(url, headers=headers)
+        with request.urlopen(req, timeout=10) as resp:
+            html = resp.read().decode("utf-8", errors="replace")
+    except Exception as e:
+        print(f"  获取{etf_code}分红数据失败: {e}")
+        _etf_yield_cache[etf_code] = None
+        return None
+
+    # 2. 解析分红表格，提取每份派现金额和日期
+    tds = re.findall(r"<td[^>]*>([^<]*)</td>", html)
+    dividends = []
+    for i in range(0, len(tds), 5):
+        row = tds[i : i + 5]
+        if len(row) >= 4 and "每份派现金" in row[3]:
+            m = re.search(r"(\d+\.?\d*)", row[3])
+            if m:
+                dividends.append((row[1], float(m.group(1))))
+        elif len(row) >= 1 and "暂无拆分信息" in row[0]:
+            break
+
+    if not dividends:
+        print(f"  {etf_code}无分红记录")
+        _etf_yield_cache[etf_code] = None
+        return None
+
+    # 3. 计算过去12个月的分红总额
+    now = now_beijing()
+    one_year_ago = now - timedelta(days=365)
+    trailing_sum = 0.0
+    for date_str, amount in dividends:
+        try:
+            d = datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=TZ_BEIJING)
+            if d >= one_year_ago:
+                trailing_sum += amount
+        except ValueError:
+            continue
+
+    if trailing_sum == 0:
+        _etf_yield_cache[etf_code] = None
+        return None
+
+    # 4. 获取当前价格 (Sina API)
+    prefix = "sh" if etf_code.startswith(("51", "56")) else "sz"
+    try:
+        sina_url = f"https://hq.sinajs.cn/list={prefix}{etf_code}"
+        req2 = request.Request(sina_url, headers={
+            "User-Agent": USER_AGENT,
+            "Referer": "https://finance.sina.com.cn/",
+        })
+        with request.urlopen(req2, timeout=10) as resp2:
+            data = resp2.read().decode("gbk", errors="replace")
+        # Sina格式: name,open,prev_close,current,high,low,...
+        current_price = float(data.split("=")[1].strip('"').split(",")[3])
+    except Exception as e:
+        print(f"  获取{etf_code}价格失败: {e}")
+        _etf_yield_cache[etf_code] = None
+        return None
+
+    yield_pct = round(trailing_sum / current_price * 100, 2)
+
+    # 5. 计算历史年度股息率（中位数作为"正常水平"）
+    yearly_div = {}
+    for date_str, amount in dividends:
+        try:
+            year = datetime.strptime(date_str, "%Y-%m-%d").year
+            yearly_div[year] = yearly_div.get(year, 0.0) + amount
+        except ValueError:
+            continue
+
+    ak = get_akshare()
+    symbol = f"{prefix}{etf_code}"
+    yearly_yields = []
+    if ak and yearly_div:
+        try:
+            df = ak.stock_zh_index_daily(symbol=symbol)
+            if df is not None and not df.empty:
+                for year, total_div in yearly_div.items():
+                    year_df = df[df["date"].apply(lambda x: str(x)[:4] == str(year))]
+                    if not year_df.empty:
+                        dec = year_df[year_df["date"].apply(lambda x: "-12-" in str(x))]
+                        if not dec.empty:
+                            close = float(dec.iloc[-1]["close"])
+                            yearly_yields.append(round(total_div / close * 100, 2))
+        except Exception:
+            pass
+
+    hist_yield = None
+    if len(yearly_yields) >= 2:
+        sorted_y = sorted(yearly_yields)
+        n = len(sorted_y)
+        hist_yield = round((sorted_y[n // 2 - 1] + sorted_y[n // 2]) / 2, 2) if n % 2 == 0 else sorted_y[n // 2]
+
+    result = {"yield_pct": yield_pct}
+    if hist_yield is not None:
+        result["hist_yield"] = hist_yield
+    _etf_yield_cache[etf_code] = result
+    return result
+
+
+def calc_multiplier_by_yield(yield_pct, hist_yield=None):
+    """股息率决定加仓力度：相对历史中位判断贵贱"""
     if yield_pct is None:
         return None
 
-    if yield_pct < 3.0:
+    # 有历史数据时，用相对历史中位的比率来评估
+    if hist_yield is not None and hist_yield > 0:
+        effective = yield_pct / hist_yield * 5.0
+    else:
+        effective = yield_pct
+
+    if effective < 3.0:
         return 0      # 极贵，暂停定投
-    elif yield_pct < 3.5:
+    elif effective < 3.5:
         return 0.3    # 很贵，暂缓投入
-    elif yield_pct < 4.0:
+    elif effective < 4.0:
         return 0.5    # 偏贵，轻仓观望
-    elif yield_pct < 4.5:
+    elif effective < 4.5:
         return 0.7    # 略贵，减少投入
-    elif yield_pct < 5.0:
+    elif effective < 5.0:
         return 1.0    # 合理，标准定投
-    elif yield_pct < 5.5:
+    elif effective < 5.5:
         return 1.5    # 便宜，适度多投
-    elif yield_pct < 6.5:
+    elif effective < 6.5:
         return 2.0    # 很便宜，加码买入
     else:
         return 2.5    # 极便宜，大幅加码
@@ -290,10 +412,11 @@ def analyze(closes, fund, valuation=None):
     diff_pct = (current_price - ma20) / ma20 * 100
     trend_up = current_price > ma60
 
-    # 股息率择时策略（回测最优：≥5%买入，≤4%卖出，4-5%持有）
+    # 股息率择时策略：相对历史中位判断贵贱
     yld = valuation.get("yield_pct") if valuation else None
     if yld is not None:
-        mult = calc_multiplier_by_yield(yld)
+        hist_yield = valuation.get("hist_yield") if valuation else None
+        mult = calc_multiplier_by_yield(yld, hist_yield)
     else:
         # 无股息率数据，回退到均线策略
         thresholds = fund.get("thresholds", (2.0, 4.0, None))
@@ -317,12 +440,16 @@ def analyze(closes, fund, valuation=None):
 
 
 def check_fund(fund):
-    """检查单个基金 - 股息率定投力度，无股息率数据时回退均线"""
+    """检查单个基金 - ETF分红反推股息率，无数据时回退均线"""
     fund_type = fund.get("type", "etf")
 
-    # 获取估值数据（如有配置指数名称）
-    index_name = fund.get("index_name")
-    valuation = fetch_index_valuation(index_name) if index_name else None
+    # 股息率来源：优先用yield_etf反推（含历史中位），其次蛋卷index_name
+    yld_etf = fund.get("yield_etf")
+    if yld_etf:
+        valuation = fetch_etf_dividend_yield(yld_etf)
+    else:
+        index_name = fund.get("index_name")
+        valuation = fetch_index_valuation(index_name) if index_name else None
 
     if fund_type == "fund":
         navs = fetch_fund_nav(fund["code"])
@@ -401,19 +528,26 @@ def send_wecom(title, results):
             if r.get("valuation"):
                 v = r["valuation"]
                 yld = v["yield_pct"]
-                if yld < 3.5:
-                    level = "🔴 很贵"
-                elif yld < 4.0:
-                    level = "🔵 偏贵"
-                elif yld < 4.5:
-                    level = "⚪ 合理"
-                elif yld < 5.0:
-                    level = "🟡 略便宜"
-                elif yld < 5.5:
-                    level = "🟠 便宜"
-                else:
-                    level = "🔥 很便宜"
-                val_info = f"\n> 股息率: **{yld}%** {level}  PE: {v['pe']}  PB: {v['pb']}"
+                if yld is not None:
+                    hist = v.get("hist_yield")
+                    effective = yld / hist * 5.0 if hist else yld
+                    if effective < 3.0:
+                        level = "🔴 极贵"
+                    elif effective < 3.5:
+                        level = "🔴 很贵"
+                    elif effective < 4.0:
+                        level = "🔵 偏贵"
+                    elif effective < 4.5:
+                        level = "⚪ 合理"
+                    elif effective < 5.0:
+                        level = "🟡 略便宜"
+                    elif effective < 5.5:
+                        level = "🟠 便宜"
+                    else:
+                        level = "🔥 很便宜"
+                    hist_str = f"（历史中位{hist}%）" if hist else ""
+                    pe_pb = f"  PE: {v['pe']}  PB: {v['pb']}" if "pe" in v else ""
+                    val_info = f"\n> 股息率: **{yld}%**{hist_str} {level}{pe_pb}"
 
             lines.append(
                 f"**{name}({code})**\n"
@@ -478,19 +612,26 @@ def build_message(results):
             if r.get("valuation"):
                 v = r["valuation"]
                 yld = v["yield_pct"]
-                if yld < 3.5:
-                    level = "很贵"
-                elif yld < 4.0:
-                    level = "偏贵"
-                elif yld < 4.5:
-                    level = "合理"
-                elif yld < 5.0:
-                    level = "略便宜"
-                elif yld < 5.5:
-                    level = "便宜"
-                else:
-                    level = "很便宜"
-                val_html = f"<br>股息率: <b>{yld}%</b>({level})  PE: {v['pe']}  PB: {v['pb']}"
+                if yld is not None:
+                    hist = v.get("hist_yield")
+                    effective = yld / hist * 5.0 if hist else yld
+                    if effective < 3.0:
+                        level = "极贵"
+                    elif effective < 3.5:
+                        level = "很贵"
+                    elif effective < 4.0:
+                        level = "偏贵"
+                    elif effective < 4.5:
+                        level = "合理"
+                    elif effective < 5.0:
+                        level = "略便宜"
+                    elif effective < 5.5:
+                        level = "便宜"
+                    else:
+                        level = "很便宜"
+                    hist_str = f"（历史中位{hist}%）" if hist else ""
+                    pe_pb = f"  PE: {v['pe']}  PB: {v['pb']}" if "pe" in v else ""
+                    val_html = f"<br>股息率: <b>{yld}%</b>{hist_str}({level}){pe_pb}"
 
             detail = (
                 f"<br>定投倍数: <b>{mult}x</b> | 当前: {price}{val_html}"
