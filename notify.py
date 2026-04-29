@@ -17,13 +17,18 @@ USER_AGENT = (
 )
 
 # 监控的基金列表
+# thresholds: (轻仓阈值%, 建议买入阈值%, 重仓阈值%或None)
 WATCH_FUNDS = [
     # ETF（场内基金）- 使用K线数据
-    {"name": "红利低波ETF", "code": "512890", "market": "1"},
-    {"name": "红利低波100", "code": "515080", "market": "1"},
-    {"name": "自由现金流ETF", "code": "159201", "market": "0"},
+    {"name": "红利低波ETF", "code": "512890", "market": "1",
+     "thresholds": (1.0, 1.8, None)},
+    {"name": "红利低波100", "code": "515080", "market": "1",
+     "thresholds": (1.5, 2.5, 3.5)},
+    {"name": "自由现金流ETF", "code": "159201", "market": "0",
+     "thresholds": (2.0, 4.0, 6.0)},
     # 场外基金 - 使用净值数据
-    {"name": "南方红利低波联接A", "code": "008163", "type": "fund"},
+    {"name": "南方红利低波联接A", "code": "008163", "type": "fund",
+     "thresholds": (1.0, 1.8, None)},
 ]
 
 # 通知方式配置
@@ -69,36 +74,36 @@ def fetch_kline(fund):
     ak = get_akshare()
 
     if ak:
-        # 使用 akshare
-        symbol = f"sh{code}" if fund["market"] == "1" else f"sz{code}"
-        df = ak.stock_zh_index_daily(symbol=symbol)
-        if df is None or df.empty:
-            raise ValueError(f"无法获取 {fund['name']}({code}) 的数据")
-        # 取最近80天（足够计算MA60）
-        df = df.tail(80)
-        # 格式: "日期,开盘,收盘,最低,最高,成交量"
-        klines = []
-        for _, row in df.iterrows():
-            klines.append(
-                f"{row['date'].strftime('%Y-%m-%d') if hasattr(row['date'], 'strftime') else str(row['date'])},"
-                f"{row['open']},{row['close']},{row['low']},{row['high']},{row['volume']}"
-            )
-        return klines
-    else:
-        # 备用方案：直接 HTTP 请求（如果可用）
-        market = fund["market"]
-        url = (
-            f"https://push2his.eastmoney.com/api/qt/stock/kline/get"
-            f"?secid={market}.{code}"
-            f"&fields1=f1,f2,f3,f4,f5,f6"
-            f"&fields2=f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61"
-            f"&klt=101&fqt=0&end=20500101&lmt=80"
-        )
-        data = fetch_json(url)
-        klines = (data.get("data") or {}).get("klines", [])
-        if not klines:
-            raise ValueError(f"无法获取 {fund['name']}({code}) 的K线数据")
-        return klines
+        try:
+            symbol = f"sh{code}" if fund["market"] == "1" else f"sz{code}"
+            df = ak.stock_zh_index_daily(symbol=symbol)
+            if df is None or df.empty:
+                raise ValueError(f"无法获取 {fund['name']}({code}) 的数据")
+            df = df.tail(80)
+            klines = []
+            for _, row in df.iterrows():
+                klines.append(
+                    f"{row['date'].strftime('%Y-%m-%d') if hasattr(row['date'], 'strftime') else str(row['date'])},"
+                    f"{row['open']},{row['close']},{row['low']},{row['high']},{row['volume']}"
+                )
+            return klines
+        except Exception:
+            pass  # akshare 失败，回退到 HTTP
+
+    # HTTP 备用方案
+    market = fund["market"]
+    url = (
+        f"https://push2his.eastmoney.com/api/qt/stock/kline/get"
+        f"?secid={market}.{code}"
+        f"&fields1=f1,f2,f3,f4,f5,f6"
+        f"&fields2=f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61"
+        f"&klt=101&fqt=0&end=20500101&lmt=80"
+    )
+    data = fetch_json(url)
+    klines = (data.get("data") or {}).get("klines", [])
+    if not klines:
+        raise ValueError(f"无法获取 {fund['name']}({code}) 的K线数据")
+    return klines
 
 
 def parse_kline(klines):
@@ -174,23 +179,29 @@ def analyze(closes, fund):
 
     diff_pct = (current_price - ma20) / ma20 * 100
     trend_up = current_price > ma60
+    t = fund.get("thresholds", (2.0, 4.0, None))
+    light_t, buy_t, strong_t = t
 
     # 分级信号判断：趋势向上(price > MA60) + 价格低于MA20时触发买入
     if trend_up and current_price < ma20:
         below_pct = abs(diff_pct)
-        if below_pct >= 4:
+        if strong_t and below_pct >= strong_t:
             signal = "strong_buy"
-        elif below_pct >= 2:
+        elif below_pct >= buy_t:
             signal = "buy"
-        else:
-            signal = "light_buy"
-    elif not trend_up and current_price < ma20:
-        below_pct = abs(diff_pct)
-        if below_pct >= 4:
+        elif below_pct >= light_t:
             signal = "light_buy"
         else:
             signal = "hold"
-    elif current_price < ma20 and abs(diff_pct) < 1:
+    elif not trend_up and current_price < ma20:
+        below_pct = abs(diff_pct)
+        if strong_t and below_pct >= strong_t:
+            signal = "light_buy"
+        elif below_pct >= buy_t:
+            signal = "hold"
+        else:
+            signal = "hold"
+    elif current_price < ma20 and abs(diff_pct) < light_t:
         signal = "hold"
     else:
         signal = "no_buy"
