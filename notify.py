@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""基金均线提醒工具 - MA均线定投+股息率止盈，每日推送定投倍数建议"""
+"""基金定投提醒工具 - 始终持有+股息率定投力度，每日推送加仓倍数建议"""
 
 import json
 import os
@@ -119,15 +119,15 @@ def calc_ma(closes, n=20):
     return sum(closes[-n:]) / n
 
 
-def multiplier_label(mult):
-    """映射定投倍数到显示信息"""
+def signal_label(mult):
+    """映射加仓倍数到信号"""
     if mult <= 0:
-        return ("#999999", "⏸️ 止盈暂停")
-    elif mult >= 2.0:
+        return ("#999999", "⏸️ 暂停定投")
+    elif mult >= 2.5:
         return ("#ff0000", "🔥 大幅加码")
-    elif mult >= 1.6:
+    elif mult >= 2.0:
         return ("#ff6600", "🟠 加码买入")
-    elif mult >= 1.3:
+    elif mult >= 1.5:
         return ("#e6a817", "🟡 适度多投")
     elif mult >= 1.0:
         return ("#666666", "⚪ 标准定投")
@@ -213,28 +213,27 @@ def fetch_index_valuation(index_name):
         return None
 
 
-def apply_valuation_modifier(mult, valuation):
-    """根据股息率调整定投倍数（股息率止盈逻辑）"""
-    if not valuation:
-        return mult
+def calc_multiplier_by_yield(yield_pct):
+    """股息率决定加仓力度：便宜多投，贵了少投甚至不投"""
+    if yield_pct is None:
+        return None
 
-    yld = valuation.get("yield_pct")
-    if yld is None:
-        return mult
-
-    # 股息率越低=价格越贵，股息率越高=价格越便宜
-    if yld < 3.5:
-        return 0  # 股息率极低，停止定投
-    elif yld < 4.0:
-        return round(mult * 0.5, 1)  # 偏贵，减半
-    elif yld < 4.5:
-        return round(mult * 0.7, 1)  # 略贵，减少
-    elif yld > 6.5:
-        return round(mult * 1.5, 1)  # 股息率极高，加码
-    elif yld > 5.5:
-        return round(mult * 1.3, 1)  # 便宜，加码
-
-    return mult
+    if yield_pct < 3.0:
+        return 0      # 极贵，暂停定投
+    elif yield_pct < 3.5:
+        return 0.3    # 很贵，暂缓投入
+    elif yield_pct < 4.0:
+        return 0.5    # 偏贵，轻仓观望
+    elif yield_pct < 4.5:
+        return 0.7    # 略贵，减少投入
+    elif yield_pct < 5.0:
+        return 1.0    # 合理，标准定投
+    elif yield_pct < 5.5:
+        return 1.5    # 便宜，适度多投
+    elif yield_pct < 6.5:
+        return 2.0    # 很便宜，加码买入
+    else:
+        return 2.5    # 极便宜，大幅加码
 
 
 def fetch_fund_nav(code):
@@ -268,7 +267,7 @@ def fetch_fund_nav(code):
 
 
 def analyze(closes, fund, valuation=None):
-    """分析价格/净值序列，结合MA20/MA60+估值给出定投倍数建议"""
+    """始终持有+股息率定投力度：股息率越高加仓越多，越低加仓越少"""
     if len(closes) < 60:
         return {
             "name": fund["name"],
@@ -283,12 +282,17 @@ def analyze(closes, fund, valuation=None):
 
     diff_pct = (current_price - ma20) / ma20 * 100
     trend_up = current_price > ma60
-    t = fund.get("thresholds", (2.0, 4.0, None))
-    mult = calc_multiplier(diff_pct, trend_up, t)
 
-    # 应用估值止盈修饰
-    mult = apply_valuation_modifier(mult, valuation)
-    color, action = multiplier_label(mult)
+    # 股息率择时策略（回测最优：≥5%买入，≤4%卖出，4-5%持有）
+    yld = valuation.get("yield_pct") if valuation else None
+    if yld is not None:
+        mult = calc_multiplier_by_yield(yld)
+    else:
+        # 无股息率数据，回退到均线策略
+        thresholds = fund.get("thresholds", (2.0, 4.0, None))
+        mult = calc_multiplier(diff_pct, trend_up, thresholds)
+
+    color, action = signal_label(mult)
 
     return {
         "name": fund["name"],
@@ -306,7 +310,7 @@ def analyze(closes, fund, valuation=None):
 
 
 def check_fund(fund):
-    """检查单个基金 - 支持ETF(场内)和场外基金，含估值止盈"""
+    """检查单个基金 - 股息率定投力度，无股息率数据时回退均线"""
     fund_type = fund.get("type", "etf")
 
     # 获取估值数据（如有配置指数名称）
@@ -369,8 +373,8 @@ def send_wecom(title, results):
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
 
     # 构建 markdown 消息
-    lines = [f"## 基金均线提醒 - {now}\n"]
-    lines.append("> 每日定投倍数建议\n")
+    lines = [f"## 股息率定投信号 - {now}\n"]
+    lines.append("> 始终持有，股息率决定加仓力度\n")
 
     for r in results:
         name = r["name"]
@@ -381,33 +385,36 @@ def send_wecom(title, results):
             lines.append(f"**{name}({code})**\n> ⚠️ {r['reason']}\n")
         else:
             price = r["current_price"]
-            ma20 = r["ma20"]
-            ma60 = r["ma60"]
-            diff_pct = r["diff_pct"]
-            trend_up = r["trend_up"]
             action = r.get("action", "")
             action_color = r.get("action_color", "#666666")
 
             status = f"<font color='{action_color}'>{action}</font>"
-            direction = "低于" if diff_pct < 0 else "高于"
-            trend_text = "↑ 向上" if trend_up else "↓ 向下"
 
             val_info = ""
             if r.get("valuation"):
                 v = r["valuation"]
                 yld = v["yield_pct"]
-                level = "极低" if yld < 3.5 else ("偏低" if yld < 4.5 else ("合理" if yld < 5.5 else "便宜"))
-                val_info = f"\n> 股息率: {yld}%({level})  PB: {v['pb']}"
+                if yld < 3.5:
+                    level = "🔴 很贵"
+                elif yld < 4.0:
+                    level = "🔵 偏贵"
+                elif yld < 4.5:
+                    level = "⚪ 合理"
+                elif yld < 5.0:
+                    level = "🟡 略便宜"
+                elif yld < 5.5:
+                    level = "🟠 便宜"
+                else:
+                    level = "🔥 很便宜"
+                val_info = f"\n> 股息率: **{yld}%** {level}  PE: {v['pe']}  PB: {v['pb']}"
 
             lines.append(
                 f"**{name}({code})**\n"
                 f"> {status}\n"
-                f"> 定投倍数: **{mult}x** | 当前: {price}\n"
-                f"> MA20: {ma20}  MA60: {ma60}\n"
-                f"> {direction}MA20 {abs(diff_pct)}%  趋势: {trend_text}{val_info}\n"
+                f"> 定投倍数: **{mult}x** | 当前: {price}{val_info}\n"
             )
 
-    lines.append(f"---\n>1 加码 =1 标准 <1 减少 | 股息率<3.5%止盈")
+    lines.append(f"---\n>始终持有从不卖出 | 股息率高多加仓 | 股息率低少加仓")
 
     payload = {
         "msgtype": "markdown",
@@ -444,7 +451,7 @@ def send_wecom(title, results):
 def build_message(results):
     """构建通知消息（返回 HTML 格式供 PushPlus 使用）"""
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
-    lines = [f"<h3>基金均线提醒 - {now}</h3>", "<p>每日定投倍数建议</p>", "<hr>"]
+    lines = [f"<h3>股息率定投信号 - {now}</h3>", "<p>始终持有，股息率决定加仓力度</p>", "<hr>"]
 
     for r in results:
         name = r["name"]
@@ -456,33 +463,36 @@ def build_message(results):
             detail = ""
         else:
             price = r["current_price"]
-            ma20 = r["ma20"]
-            ma60 = r["ma60"]
-            diff_pct = r["diff_pct"]
-            trend_up = r["trend_up"]
             action = r.get("action", "")
             action_color = r.get("action_color", "#666666")
 
             status = f"<span style='color:{action_color};font-weight:bold'>{action}</span>"
-            direction = "低于" if diff_pct < 0 else "高于"
-            trend_text = "↑ 向上" if trend_up else "↓ 向下"
             val_html = ""
             if r.get("valuation"):
                 v = r["valuation"]
                 yld = v["yield_pct"]
-                level = "极低" if yld < 3.5 else ("偏低" if yld < 4.5 else ("合理" if yld < 5.5 else "便宜"))
-                val_html = f"<br>股息率: {yld}%({level})  PB: {v['pb']}"
+                if yld < 3.5:
+                    level = "很贵"
+                elif yld < 4.0:
+                    level = "偏贵"
+                elif yld < 4.5:
+                    level = "合理"
+                elif yld < 5.0:
+                    level = "略便宜"
+                elif yld < 5.5:
+                    level = "便宜"
+                else:
+                    level = "很便宜"
+                val_html = f"<br>股息率: <b>{yld}%</b>({level})  PE: {v['pe']}  PB: {v['pb']}"
 
             detail = (
-                f"<br>定投倍数: <b>{mult}x</b> | 当前: {price}"
-                f"<br>MA20: {ma20}  MA60: {ma60}"
-                f"<br>{direction}MA20 {abs(diff_pct)}%  趋势: {trend_text}{val_html}"
+                f"<br>定投倍数: <b>{mult}x</b> | 当前: {price}{val_html}"
             )
 
         lines.append(f"<p><b>{name}({code})</b> - {status}{detail}</p>")
 
     lines.append("<hr>")
-    lines.append("<p>定投倍数 >1 加码，=1 标准，<1 减少</p>")
+    lines.append("<p>始终持有从不卖出 | 股息率高多加仓 | 股息率低少加仓</p>")
 
     return "\n".join(lines)
 
@@ -497,8 +507,8 @@ def send_notification(title, content, results):
 
 def main():
     """主函数"""
-    print(f"开始检查基金均线... {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    
+    print(f"开始检查股息率定投信号... {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+
     results = []
     for fund in WATCH_FUNDS:
         try:
@@ -513,9 +523,9 @@ def main():
                 "multiplier": 0,
                 "reason": f"获取数据失败: {e}",
             })
-    
+
     # 构建并发送通知
-    title = f"基金均线提醒 - {datetime.now().strftime('%m月%d日')}"
+    title = f"股息率定投信号 - {datetime.now().strftime('%m月%d日')}"
     content = build_message(results)
     
     send_notification(title, content, results)

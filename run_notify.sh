@@ -1,5 +1,5 @@
 #!/bin/zsh
-# 设置环境变量并运行通知脚本
+# 股息率定投信号 - 始终持有，股息率只决定加仓力度
 
 # 通知方式: wecom (企业微信) 或 pushplus
 export NOTIFY_TYPE="wecom"
