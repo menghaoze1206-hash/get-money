@@ -4,7 +4,14 @@
 import json
 import os
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+
+# 北京时间
+TZ_BEIJING = timezone(timedelta(hours=8))
+
+
+def now_beijing():
+    return datetime.now(tz=TZ_BEIJING)
 from pathlib import Path
 from urllib import error, parse, request
 
@@ -370,7 +377,7 @@ def send_wecom(title, results):
         print("错误: 未设置 WECOM_KEY 环境变量")
         return False
 
-    now = datetime.now().strftime("%Y-%m-%d %H:%M")
+    now = now_beijing().strftime("%Y-%m-%d %H:%M")
 
     # 构建 markdown 消息
     lines = [f"## 股息率定投信号 - {now}\n"]
@@ -450,7 +457,7 @@ def send_wecom(title, results):
 
 def build_message(results):
     """构建通知消息（返回 HTML 格式供 PushPlus 使用）"""
-    now = datetime.now().strftime("%Y-%m-%d %H:%M")
+    now = now_beijing().strftime("%Y-%m-%d %H:%M")
     lines = [f"<h3>股息率定投信号 - {now}</h3>", "<p>始终持有，股息率决定加仓力度</p>", "<hr>"]
 
     for r in results:
@@ -507,7 +514,7 @@ def send_notification(title, content, results):
 
 def main():
     """主函数"""
-    print(f"开始检查股息率定投信号... {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"开始检查股息率定投信号... {now_beijing().strftime('%Y-%m-%d %H:%M:%S')}")
 
     results = []
     for fund in WATCH_FUNDS:
@@ -525,7 +532,7 @@ def main():
             })
 
     # 构建并发送通知
-    title = f"股息率定投信号 - {datetime.now().strftime('%m月%d日')}"
+    title = f"股息率定投信号 - {now_beijing().strftime('%m月%d日')}"
     content = build_message(results)
     
     send_notification(title, content, results)
