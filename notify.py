@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""基金均线提醒工具 - 结合20日/60日均线，分级判断买入信号并通过微信通知"""
+"""基金均线提醒工具 - MA均线定投+股息率止盈，每日推送定投倍数建议"""
 
 import json
 import os
@@ -19,12 +19,12 @@ USER_AGENT = (
 WATCH_FUNDS = [
     # ETF（场内基金）- 使用K线数据
     {"name": "红利低波ETF", "code": "512890", "market": "1",
-     "thresholds": (1.0, 1.8, None)},
+     "thresholds": (1.0, 1.8, None), "index_name": "红利低波"},
     {"name": "自由现金流ETF", "code": "159201", "market": "0",
      "thresholds": (2.0, 4.0, 6.0)},
     # 场外基金 - 使用净值数据
     {"name": "南方红利低波联接A", "code": "008163", "type": "fund",
-     "thresholds": (1.0, 1.8, None)},
+     "thresholds": (1.0, 1.8, None), "index_name": "标普红利"},
 ]
 
 # 通知方式配置
@@ -121,7 +121,9 @@ def calc_ma(closes, n=20):
 
 def multiplier_label(mult):
     """映射定投倍数到显示信息"""
-    if mult >= 2.0:
+    if mult <= 0:
+        return ("#999999", "⏸️ 止盈暂停")
+    elif mult >= 2.0:
         return ("#ff0000", "🔥 大幅加码")
     elif mult >= 1.6:
         return ("#ff6600", "🟠 加码买入")
@@ -172,6 +174,68 @@ def calc_multiplier(diff_pct, trend_up, thresholds):
             return 0.5
 
 
+# 估值缓存（同一次运行内复用）
+_val_cache = {}
+
+
+def fetch_index_valuation(index_name):
+    """从蛋卷基金获取指数PE/股息率估值数据"""
+    if index_name in _val_cache:
+        return _val_cache[index_name]
+
+    url = "https://danjuanfunds.com/djapi/index_eva/dj"
+    headers = {
+        "User-Agent": USER_AGENT,
+        "Referer": "https://danjuanfunds.com/",
+    }
+    try:
+        req = request.Request(url, headers=headers)
+        with request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode("utf-8", errors="replace"))
+        items = data.get("data", {}).get("items", [])
+        for item in items:
+            name = item.get("name", "")
+            if name == index_name:
+                result = {
+                    "pe": item.get("pe"),
+                    "pb": item.get("pb"),
+                    "yield_pct": round(item.get("yeild", 0) * 100, 2),
+                    "pe_pct": item.get("pe_percentile"),
+                    "pb_pct": item.get("pb_percentile"),
+                }
+                _val_cache[index_name] = result
+                return result
+        _val_cache[index_name] = None
+        return None
+    except Exception as e:
+        print(f"  获取{index_name}估值失败: {e}")
+        _val_cache[index_name] = None
+        return None
+
+
+def apply_valuation_modifier(mult, valuation):
+    """根据PE百分位调整定投倍数（股息率止盈逻辑）"""
+    if not valuation:
+        return mult
+
+    pe_pct = valuation.get("pe_pct")
+    if pe_pct is None:
+        return mult
+
+    if pe_pct > 0.9:
+        return 0  # 极度高估，停止定投
+    elif pe_pct > 0.8:
+        return round(mult * 0.5, 1)  # 高估，减半
+    elif pe_pct > 0.7:
+        return round(mult * 0.7, 1)  # 偏高，减少
+    elif pe_pct < 0.2:
+        return round(mult * 1.5, 1)  # 极度低估，加码
+    elif pe_pct < 0.3:
+        return round(mult * 1.3, 1)  # 低估，加码
+
+    return mult
+
+
 def fetch_fund_nav(code):
     """获取场外基金净值历史（最近80个交易日），返回净值列表（从旧到新）"""
     JZ_URL = "https://api.fund.eastmoney.com/f10/lsjz"
@@ -202,8 +266,8 @@ def fetch_fund_nav(code):
     return navs
 
 
-def analyze(closes, fund):
-    """分析价格/净值序列，结合MA20/MA60给出定投倍数建议"""
+def analyze(closes, fund, valuation=None):
+    """分析价格/净值序列，结合MA20/MA60+估值给出定投倍数建议"""
     if len(closes) < 60:
         return {
             "name": fund["name"],
@@ -220,6 +284,9 @@ def analyze(closes, fund):
     trend_up = current_price > ma60
     t = fund.get("thresholds", (2.0, 4.0, None))
     mult = calc_multiplier(diff_pct, trend_up, t)
+
+    # 应用估值止盈修饰
+    mult = apply_valuation_modifier(mult, valuation)
     color, action = multiplier_label(mult)
 
     return {
@@ -233,20 +300,25 @@ def analyze(closes, fund):
         "multiplier": mult,
         "action": action,
         "action_color": color,
+        "valuation": valuation,
     }
 
 
 def check_fund(fund):
-    """检查单个基金 - 支持ETF(场内)和场外基金"""
+    """检查单个基金 - 支持ETF(场内)和场外基金，含估值止盈"""
     fund_type = fund.get("type", "etf")
+
+    # 获取估值数据（如有配置指数名称）
+    index_name = fund.get("index_name")
+    valuation = fetch_index_valuation(index_name) if index_name else None
 
     if fund_type == "fund":
         navs = fetch_fund_nav(fund["code"])
-        return analyze(navs, fund)
+        return analyze(navs, fund, valuation)
     else:
         klines = fetch_kline(fund)
         closes = parse_kline(klines)
-        return analyze(closes, fund)
+        return analyze(closes, fund, valuation)
 
 
 def send_pushplus(title, content):
@@ -319,15 +391,20 @@ def send_wecom(title, results):
             direction = "低于" if diff_pct < 0 else "高于"
             trend_text = "↑ 向上" if trend_up else "↓ 向下"
 
+            val_info = ""
+            if r.get("valuation"):
+                v = r["valuation"]
+                val_info = f"\n> PE: {v['pe']}  PE分位: {v['pe_pct']*100:.0f}%  股息率: {v['yield_pct']}%"
+
             lines.append(
                 f"**{name}({code})**\n"
                 f"> {status}\n"
                 f"> 定投倍数: **{mult}x** | 当前: {price}\n"
                 f"> MA20: {ma20}  MA60: {ma60}\n"
-                f"> {direction}MA20 {abs(diff_pct)}%  趋势: {trend_text}\n"
+                f"> {direction}MA20 {abs(diff_pct)}%  趋势: {trend_text}{val_info}\n"
             )
 
-    lines.append(f"---\n定投倍数 >1 加码，=1 标准，<1 减少")
+    lines.append(f"---\n定投倍数 >1 加码，=1 标准，<1 减少 | 止盈暂停=0")
 
     payload = {
         "msgtype": "markdown",
@@ -386,10 +463,15 @@ def build_message(results):
             status = f"<span style='color:{action_color};font-weight:bold'>{action}</span>"
             direction = "低于" if diff_pct < 0 else "高于"
             trend_text = "↑ 向上" if trend_up else "↓ 向下"
+            val_html = ""
+            if r.get("valuation"):
+                v = r["valuation"]
+                val_html = f"<br>PE: {v['pe']}  PE分位: {v['pe_pct']*100:.0f}%  股息率: {v['yield_pct']}%"
+
             detail = (
                 f"<br>定投倍数: <b>{mult}x</b> | 当前: {price}"
                 f"<br>MA20: {ma20}  MA60: {ma60}"
-                f"<br>{direction}MA20 {abs(diff_pct)}%  趋势: {trend_text}"
+                f"<br>{direction}MA20 {abs(diff_pct)}%  趋势: {trend_text}{val_html}"
             )
 
         lines.append(f"<p><b>{name}({code})</b> - {status}{detail}</p>")
