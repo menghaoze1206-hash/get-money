@@ -131,20 +131,20 @@ def signal_label(mult):
     """映射加仓倍数到信号"""
     if mult <= 0:
         return ("#999999", "⏸️ 暂停定投")
-    elif mult >= 2.5:
-        return ("#ff0000", "🔥 大幅加码")
-    elif mult >= 2.0:
-        return ("#ff6600", "🟠 加码买入")
-    elif mult >= 1.5:
-        return ("#e6a817", "🟡 适度多投")
-    elif mult >= 1.0:
-        return ("#666666", "⚪ 标准定投")
-    elif mult >= 0.7:
-        return ("#3366cc", "🔵 减少投入")
-    elif mult >= 0.5:
-        return ("#339933", "🟢 轻仓观望")
-    else:
+    elif mult <= 0.4:
         return ("#999999", "⏸️ 暂缓投入")
+    elif mult <= 0.6:
+        return ("#339933", "🟢 轻仓观望")
+    elif mult <= 0.8:
+        return ("#3366cc", "🔵 减少投入")
+    elif mult <= 1.2:
+        return ("#666666", "⚪ 标准定投")
+    elif mult <= 1.6:
+        return ("#e6a817", "🟡 适度多投")
+    elif mult <= 2.2:
+        return ("#ff6600", "🟠 加码买入")
+    else:
+        return ("#ff0000", "🔥 大幅加码")
 
 
 def calc_multiplier(diff_pct, trend_up, thresholds):
@@ -337,32 +337,18 @@ def fetch_etf_dividend_yield(etf_code):
 
 
 def calc_multiplier_by_yield(yield_pct, hist_yield=None):
-    """股息率决定加仓力度：相对历史中位判断贵贱"""
+    """股息率决定加仓力度：线性连续，每0.1%都影响倍率"""
     if yield_pct is None:
         return None
 
-    # 有历史数据时，用相对历史中位的比率来评估
     if hist_yield is not None and hist_yield > 0:
         effective = yield_pct / hist_yield * 5.0
     else:
         effective = yield_pct
 
-    if effective < 3.0:
-        return 0      # 极贵，暂停定投
-    elif effective < 3.5:
-        return 0.3    # 很贵，暂缓投入
-    elif effective < 4.0:
-        return 0.5    # 偏贵，轻仓观望
-    elif effective < 4.5:
-        return 0.7    # 略贵，减少投入
-    elif effective < 5.0:
-        return 1.0    # 合理，标准定投
-    elif effective < 5.5:
-        return 1.5    # 便宜，适度多投
-    elif effective < 6.5:
-        return 2.0    # 很便宜，加码买入
-    else:
-        return 2.5    # 极便宜，大幅加码
+    # 基准3%→0x, 每+2%→+1x, 上限2.5x(8%)
+    mult = (effective - 3.0) / 2.0
+    return round(max(0.0, min(2.5, mult)), 2)
 
 
 def fetch_fund_nav(code):
