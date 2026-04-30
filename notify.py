@@ -29,7 +29,7 @@ WATCH_FUNDS = [
     {"name": "红利低波ETF", "code": "512890", "market": "1",
      "thresholds": (1.0, 1.8, None), "index_name": "红利低波"},
     {"name": "自由现金流ETF", "code": "159201", "market": "0",
-     "thresholds": (2.0, 4.0, 6.0)},
+     "yield_etf": "159201", "thresholds": (2.0, 4.0, 6.0)},
     # 场外基金 - 使用净值数据
     {"name": "南方红利低波联接A", "code": "008163", "type": "fund",
      "thresholds": (1.0, 1.8, None), "index_name": "标普红利"},
@@ -131,17 +131,13 @@ def signal_label(mult):
     """映射加仓倍数到信号"""
     if mult <= 0:
         return ("#999999", "⏸️ 暂停定投")
-    elif mult <= 0.4:
+    elif mult <= 0.5:
         return ("#999999", "⏸️ 暂缓投入")
-    elif mult <= 0.6:
-        return ("#339933", "🟢 轻仓观望")
-    elif mult <= 0.8:
-        return ("#3366cc", "🔵 减少投入")
-    elif mult <= 1.2:
+    elif mult <= 1.0:
         return ("#666666", "⚪ 标准定投")
-    elif mult <= 1.6:
+    elif mult <= 1.5:
         return ("#e6a817", "🟡 适度多投")
-    elif mult <= 2.2:
+    elif mult <= 2.0:
         return ("#ff6600", "🟠 加码买入")
     else:
         return ("#ff0000", "🔥 大幅加码")
@@ -157,27 +153,27 @@ def calc_multiplier(diff_pct, trend_up, thresholds):
             if strong_t and below_pct >= strong_t:
                 return 2.0
             elif below_pct >= buy_t:
-                return 1.6
+                return 1.5
             elif below_pct >= light_t:
-                return 1.3
+                return 1.0
             else:
                 return 1.0
         else:  # 高于MA20，少投
             if diff_pct >= light_t:
-                return 0.4
+                return 0.5
             elif diff_pct >= light_t * 0.5:
-                return 0.6
+                return 0.5
             else:
-                return 0.8
+                return 1.0
     else:  # 趋势向下，控制仓位
         if diff_pct < 0:
             below_pct = abs(diff_pct)
             if strong_t and below_pct >= strong_t:
                 return 1.0
             elif below_pct >= buy_t:
-                return 0.8
+                return 1.0
             else:
-                return 0.7
+                return 0.5
         else:
             return 0.5
 
@@ -346,9 +342,9 @@ def calc_multiplier_by_yield(yield_pct, hist_yield=None):
     else:
         effective = yield_pct
 
-    # 基准3%→0x, 每+2%→+1x, 上限2.5x(8%)
+    # 基准3%→0x, 每+2%→+1x, 上限2.5x(8%), 取最近0.5
     mult = (effective - 3.0) / 2.0
-    return round(max(0.0, min(2.5, mult)), 2)
+    return round(max(0.0, min(2.5, mult)) * 2) / 2
 
 
 def fetch_fund_nav(code):
