@@ -2,7 +2,7 @@
 
 ## 项目概览
 
-工作日定时推送股息率定投信号到微信（企业微信/PushPlus）。
+工作日检测股息率，便宜时推送一次性买入信号到微信（企业微信/PushPlus）。
 
 ---
 
@@ -29,55 +29,47 @@
          │         └─ 场外基金 → fetch_fund_nav()
          │
          ├─ analyze()
-         │    ├─ 有股息率数据 → calc_multiplier_by_yield()
-         │    └─ 无股息率数据 → calc_multiplier() (MA 回退)
+         │    ├─ 有股息率数据 → calc_effective_yield() → buy_signal()
+         │    └─ 无股息率数据 → 无法判断
          │
          └─ 推送通知
               ├─ NOTIFY_TYPE=wecom → send_wecom() [企业微信机器人]
               └─ NOTIFY_TYPE=pushplus → send_pushplus() [PushPlus]
 ```
 
-## 二、策略核心：股息率定投公式
+## 二、策略核心：股息率择时买入
 
 ```
 effective = yield_pct / hist_yield × 5.0        （有历史中位时）
 effective = yield_pct                            （无历史中位时）
 
-multiplier = (effective - 3.0) / 2.0
-           = round(multiplier × 2) / 2            ← 取最近 0.5 步长
-           = clamp(0, 2.5)
-
-含义：
-  effective = 3.0  →  0x   停止定投
-  effective = 5.0  →  1.0x  标准定投
-  effective = 7.0  →  2.0x  加码买入
-  effective = 8.0  →  2.5x  大幅加码（上限）
+信号判断：
+  effective < 6.0   →  继续等待（不便宜，不动）
+  effective >= 6.0  →  买入机会（便宜，一次性买入）
+  effective >= 8.0  →  大举买入（非常便宜，多买）
 ```
 
-**核心思想**：股息率相对历史越高，说明越便宜，定投倍率越大。
+**核心思想**：只在股息率显著高于历史时才出手，平时不动。不参与定投。
 
 ## 三、信号分档
 
 ```
-  multiplier    label        color
+  effective    label        color
   ─────────    ─────        ──────
-     0x        ⏸️ 暂停定投    #999999
-    0.5x       ⏸️ 暂缓投入    #999999
-    1.0x       ⚪ 标准定投    #666666
-    1.5x       🟡 适度多投    #e6a817
-    2.0x       🟠 加码买入    #ff6600
-    2.5x       🔥 大幅加码    #ff0000
+     <6.0      继续等待      #999999
+    6.0~7.9    买入机会      #ff6600
+     >=8.0     🔥 大举买入    #ff0000
 ```
 
 ## 四、基金配置 (WATCH_FUNDS)
 
-| 基金 | 代码 | 类型 | 数据源 | 阈值 |
-|---|---|---|---|---|
-| 红利低波ETF | 512890 | ETF | 蛋卷指数(红利低波) | (1.0, 1.8, -) |
-| 自由现金流ETF | 159201 | ETF | ETF分红反推 | (2.0, 4.0, 6.0) |
-| 南方红利低波联接A | 008163 | 场外基金 | 蛋卷指数(标普红利) | (1.0, 1.8, -) |
+| 基金 | 代码 | 类型 | 数据源 |
+|---|---|---|---|
+| 红利低波ETF | 512890 | ETF | 蛋卷指数(红利低波) |
+| 自由现金流ETF | 159201 | ETF | ETF分红反推 |
+| 南方红利低波联接A | 008163 | 场外基金 | 蛋卷指数(标普红利) |
 
-数据优先级：`yield_etf` > `index_name` > MA 均线回退
+数据优先级：`yield_etf` > `index_name`
 
 ## 五、关键函数一览
 
@@ -87,10 +79,9 @@ multiplier = (effective - 3.0) / 2.0
 | `fetch_index_valuation()` | 从蛋卷获取指数 PE/PB/股息率 | danjuanfunds.com |
 | `fetch_kline()` | 获取 ETF 日 K 线 (最近 80 根) | eastmoney, akshare |
 | `fetch_fund_nav()` | 获取场外基金净值 (最近 80 个交易日) | eastmoney |
-| `calc_multiplier_by_yield()` | 股息率 → 定投倍率 (主策略) | 无 |
-| `calc_multiplier()` | MA 偏离 + 趋势 → 定投倍率 (回退策略) | 无 |
-| `analyze()` | 组装均线+估值数据，决策倍率 | 无 |
-| `signal_label()` | 倍率 → 信号标签 + 颜色 | 无 |
+| `calc_effective_yield()` | 股息率 → 有效股息率（相对历史标准化） | 无 |
+| `buy_signal()` | 有效股息率 → 买入信号 + 颜色 | 无 |
+| `analyze()` | 组装均线+估值数据，决策信号 | 无 |
 | `send_wecom()` | 企业微信机器人 Markdown 推送 | 企业微信 webhook |
 | `send_pushplus()` | PushPlus 微信推送 | pushplus.plus |
 
@@ -146,3 +137,4 @@ multiplier = (effective - 3.0) / 2.0
 | 04-30 | `02e43ef` | **引入历史中位**：相对股息率框架 |
 | 04-30 | `f37e606` | **连续线性公式**：(eff-3.0)/2.0，范围 0~2.5x |
 | 04-30 | `43e7db1` | 倍率取整到 0.5 步长，自由现金流接入股息率策略 |
+| 05-01 | - | **放弃定投，改为机会买入**：effective>=6 买入，>=8 大举买入 |

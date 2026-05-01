@@ -127,55 +127,17 @@ def calc_ma(closes, n=20):
     return sum(closes[-n:]) / n
 
 
-def signal_label(mult):
-    """映射加仓倍数到信号"""
-    if mult <= 0:
-        return ("#999999", "⏸️ 暂停定投")
-    elif mult <= 0.5:
-        return ("#999999", "⏸️ 暂缓投入")
-    elif mult <= 1.0:
-        return ("#666666", "⚪ 标准定投")
-    elif mult <= 1.5:
-        return ("#e6a817", "🟡 适度多投")
-    elif mult <= 2.0:
-        return ("#ff6600", "🟠 加码买入")
+def buy_signal(effective):
+    """根据有效股息率判断买入机会"""
+    if effective is None:
+        return ("#999999", "无法判断")
+    if effective >= 8.0:
+        return ("#ff0000", "🔥 大举买入")
+    elif effective >= 6.0:
+        return ("#ff6600", "买入机会")
     else:
-        return ("#ff0000", "🔥 大幅加码")
+        return ("#999999", "继续等待")
 
-
-def calc_multiplier(diff_pct, trend_up, thresholds):
-    """根据偏离和趋势计算定投倍数"""
-    light_t, buy_t, strong_t = thresholds
-
-    if trend_up:
-        if diff_pct < 0:  # 低于MA20，多投
-            below_pct = abs(diff_pct)
-            if strong_t and below_pct >= strong_t:
-                return 2.0
-            elif below_pct >= buy_t:
-                return 1.5
-            elif below_pct >= light_t:
-                return 1.0
-            else:
-                return 1.0
-        else:  # 高于MA20，少投
-            if diff_pct >= light_t:
-                return 0.5
-            elif diff_pct >= light_t * 0.5:
-                return 0.5
-            else:
-                return 1.0
-    else:  # 趋势向下，控制仓位
-        if diff_pct < 0:
-            below_pct = abs(diff_pct)
-            if strong_t and below_pct >= strong_t:
-                return 1.0
-            elif below_pct >= buy_t:
-                return 1.0
-            else:
-                return 0.5
-        else:
-            return 0.5
 
 
 # 估值缓存（同一次运行内复用）
@@ -332,19 +294,13 @@ def fetch_etf_dividend_yield(etf_code):
     return result
 
 
-def calc_multiplier_by_yield(yield_pct, hist_yield=None):
-    """股息率决定加仓力度：线性连续，每0.1%都影响倍率"""
+def calc_effective_yield(yield_pct, hist_yield=None):
+    """计算有效股息率（相对历史中位标准化到5%基准）"""
     if yield_pct is None:
         return None
-
     if hist_yield is not None and hist_yield > 0:
-        effective = yield_pct / hist_yield * 5.0
-    else:
-        effective = yield_pct
-
-    # 基准3%→0x, 每+2%→+1x, 上限2.5x(8%), 取最近0.5
-    mult = (effective - 3.0) / 2.0
-    return round(max(0.0, min(2.5, mult)) * 2) / 2
+        return round(yield_pct / hist_yield * 5.0, 1)
+    return round(yield_pct, 1)
 
 
 def fetch_fund_nav(code):
@@ -378,12 +334,12 @@ def fetch_fund_nav(code):
 
 
 def analyze(closes, fund, valuation=None):
-    """始终持有+股息率定投力度：股息率越高加仓越多，越低加仓越少"""
+    """股息率择时：便宜时提示一次性买入，不便宜时等待"""
     if len(closes) < 60:
         return {
             "name": fund["name"],
             "code": fund["code"],
-            "multiplier": 0,
+            "effective": None,
             "reason": f"数据不足60个交易日(当前{len(closes)}天)",
         }
 
@@ -394,17 +350,15 @@ def analyze(closes, fund, valuation=None):
     diff_pct = (current_price - ma20) / ma20 * 100
     trend_up = current_price > ma60
 
-    # 股息率择时策略：相对历史中位判断贵贱
+    # 股息率择时：有效股息率>=6买入，>=8大举买入
     yld = valuation.get("yield_pct") if valuation else None
     if yld is not None:
         hist_yield = valuation.get("hist_yield") if valuation else None
-        mult = calc_multiplier_by_yield(yld, hist_yield)
+        effective = calc_effective_yield(yld, hist_yield)
     else:
-        # 无股息率数据，回退到均线策略
-        thresholds = fund.get("thresholds", (2.0, 4.0, None))
-        mult = calc_multiplier(diff_pct, trend_up, thresholds)
+        effective = None
 
-    color, action = signal_label(mult)
+    color, action = buy_signal(effective)
 
     return {
         "name": fund["name"],
@@ -414,7 +368,7 @@ def analyze(closes, fund, valuation=None):
         "ma60": round(ma60, 3),
         "diff_pct": round(diff_pct, 2),
         "trend_up": trend_up,
-        "multiplier": mult,
+        "effective": effective,
         "action": action,
         "action_color": color,
         "valuation": valuation,
@@ -489,20 +443,20 @@ def send_wecom(title, results):
     now = now_beijing().strftime("%Y-%m-%d %H:%M")
 
     # 构建 markdown 消息
-    lines = [f"## 股息率定投信号 - {now}\n"]
-    lines.append("> 始终持有，股息率决定加仓力度\n")
+    lines = [f"## 股息率买入信号 - {now}\n"]
+    lines.append("> 股息率便宜时一次性买入，不便宜时继续等待\n")
 
     for r in results:
         name = r["name"]
         code = r["code"]
-        mult = r.get("multiplier", 1.0)
 
         if "reason" in r:
-            lines.append(f"**{name}({code})**\n> ⚠️ {r['reason']}\n")
+            lines.append(f"**{name}({code})**\n>  {r['reason']}\n")
         else:
             price = r["current_price"]
             action = r.get("action", "")
             action_color = r.get("action_color", "#666666")
+            effective = r.get("effective")
 
             status = f"<font color='{action_color}'>{action}</font>"
 
@@ -512,32 +466,31 @@ def send_wecom(title, results):
                 yld = v["yield_pct"]
                 if yld is not None:
                     hist = v.get("hist_yield")
-                    effective = yld / hist * 5.0 if hist else yld
-                    if effective < 3.0:
-                        level = "🔴 极贵"
-                    elif effective < 3.5:
-                        level = "🔴 很贵"
-                    elif effective < 4.0:
-                        level = "🔵 偏贵"
-                    elif effective < 4.5:
-                        level = "⚪ 合理"
-                    elif effective < 5.0:
-                        level = "🟡 略便宜"
-                    elif effective < 5.5:
-                        level = "🟠 便宜"
+                    if effective is not None:
+                        if effective < 5.0:
+                            level = "偏贵"
+                        elif effective < 6.0:
+                            level = "合理"
+                        elif effective < 7.0:
+                            level = "略便宜"
+                        elif effective < 8.0:
+                            level = "便宜"
+                        else:
+                            level = "很便宜"
                     else:
-                        level = "🔥 很便宜"
+                        level = ""
                     hist_str = f"（历史中位{hist}%）" if hist else ""
                     pe_pb = f"  PE: {v['pe']}  PB: {v['pb']}" if "pe" in v else ""
-                    val_info = f"\n> 股息率: **{yld}%**{hist_str} {level}{pe_pb}"
+                    eff_str = f" 有效: {effective}" if effective is not None else ""
+                    val_info = f"\n> 股息率: **{yld}%**{hist_str} {level}{eff_str}{pe_pb}"
 
+            ma_str = f"\n> MA20: {r['ma20']} 偏离: {r['diff_pct']}%"
             lines.append(
                 f"**{name}({code})**\n"
-                f"> {status}\n"
-                f"> 定投倍数: **{mult}x** | 当前: {price}{val_info}\n"
+                f"> {status}{ma_str}{val_info}\n"
             )
 
-    lines.append(f"---\n>始终持有从不卖出 | 股息率高多加仓 | 股息率低少加仓")
+    lines.append(f"---\n> 股息率相对历史越高越便宜 | 便宜时买入 | 不便宜时等待")
 
     payload = {
         "msgtype": "markdown",
@@ -574,20 +527,20 @@ def send_wecom(title, results):
 def build_message(results):
     """构建通知消息（返回 HTML 格式供 PushPlus 使用）"""
     now = now_beijing().strftime("%Y-%m-%d %H:%M")
-    lines = [f"<h3>股息率定投信号 - {now}</h3>", "<p>始终持有，股息率决定加仓力度</p>", "<hr>"]
+    lines = [f"<h3>股息率买入信号 - {now}</h3>", "<p>股息率便宜时一次性买入，不便宜时继续等待</p>", "<hr>"]
 
     for r in results:
         name = r["name"]
         code = r["code"]
-        mult = r.get("multiplier", 1.0)
 
         if "reason" in r:
-            status = f"<span style='color:gray'>⚠️ {r['reason']}</span>"
+            status = f"<span style='color:gray'>{r['reason']}</span>"
             detail = ""
         else:
             price = r["current_price"]
             action = r.get("action", "")
             action_color = r.get("action_color", "#666666")
+            effective = r.get("effective")
 
             status = f"<span style='color:{action_color};font-weight:bold'>{action}</span>"
             val_html = ""
@@ -596,33 +549,31 @@ def build_message(results):
                 yld = v["yield_pct"]
                 if yld is not None:
                     hist = v.get("hist_yield")
-                    effective = yld / hist * 5.0 if hist else yld
-                    if effective < 3.0:
-                        level = "极贵"
-                    elif effective < 3.5:
-                        level = "很贵"
-                    elif effective < 4.0:
-                        level = "偏贵"
-                    elif effective < 4.5:
-                        level = "合理"
-                    elif effective < 5.0:
-                        level = "略便宜"
-                    elif effective < 5.5:
-                        level = "便宜"
+                    if effective is not None:
+                        if effective < 5.0:
+                            level = "偏贵"
+                        elif effective < 6.0:
+                            level = "合理"
+                        elif effective < 7.0:
+                            level = "略便宜"
+                        elif effective < 8.0:
+                            level = "便宜"
+                        else:
+                            level = "很便宜"
                     else:
-                        level = "很便宜"
+                        level = ""
                     hist_str = f"（历史中位{hist}%）" if hist else ""
                     pe_pb = f"  PE: {v['pe']}  PB: {v['pb']}" if "pe" in v else ""
-                    val_html = f"<br>股息率: <b>{yld}%</b>{hist_str}({level}){pe_pb}"
+                    eff_str = f" 有效: {effective}" if effective is not None else ""
+                    val_html = f"<br>股息率: <b>{yld}%</b>{hist_str}({level}){eff_str}{pe_pb}"
 
-            detail = (
-                f"<br>定投倍数: <b>{mult}x</b> | 当前: {price}{val_html}"
-            )
+            ma_str = f"<br>MA20: {r['ma20']} 偏离: {r['diff_pct']}%"
+            detail = f"{ma_str}{val_html}"
 
         lines.append(f"<p><b>{name}({code})</b> - {status}{detail}</p>")
 
     lines.append("<hr>")
-    lines.append("<p>始终持有从不卖出 | 股息率高多加仓 | 股息率低少加仓</p>")
+    lines.append("<p>股息率相对历史越高越便宜 | 便宜时买入 | 不便宜时等待</p>")
 
     return "\n".join(lines)
 
@@ -637,27 +588,29 @@ def send_notification(title, content, results):
 
 def main():
     """主函数"""
-    print(f"开始检查股息率定投信号... {now_beijing().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"开始检查股息率买入信号... {now_beijing().strftime('%Y-%m-%d %H:%M:%S')}")
 
     results = []
     for fund in WATCH_FUNDS:
         try:
             result = check_fund(fund)
             results.append(result)
-            print(f"  {result['name']}({result['code']}): {result.get('multiplier', 0)}x {result.get('action', '')}")
+            eff = result.get("effective")
+            eff_str = f" eff={eff}" if eff is not None else ""
+            print(f"  {result['name']}({result['code']}): {result.get('action', '')}{eff_str}")
         except Exception as e:
             print(f"  检查 {fund['name']}({fund['code']}) 失败: {e}")
             results.append({
                 "name": fund["name"],
                 "code": fund["code"],
-                "multiplier": 0,
+                "effective": None,
                 "reason": f"获取数据失败: {e}",
             })
 
     # 构建并发送通知
-    title = f"股息率定投信号 - {now_beijing().strftime('%m月%d日')}"
+    title = f"股息率买入信号 - {now_beijing().strftime('%m月%d日')}"
     content = build_message(results)
-    
+
     send_notification(title, content, results)
     print("检查完成")
 
