@@ -29,7 +29,7 @@ WATCH_FUNDS = [
     {"name": "红利低波ETF", "code": "512890", "market": "1",
      "thresholds": (1.0, 1.8, None), "index_name": "红利低波"},
     {"name": "自由现金流ETF", "code": "159201", "market": "0",
-     "yield_etf": "159201", "thresholds": (2.0, 4.0, 6.0)},
+     "yield_etf": "159201", "index_code": "980092"},
     # 场外基金 - 使用净值数据
     {"name": "南方红利低波联接A", "code": "008163", "type": "fund",
      "thresholds": (1.0, 1.8, None), "index_name": "标普红利"},
@@ -303,6 +303,69 @@ def calc_effective_yield(yield_pct, hist_yield=None):
     return round(yield_pct, 1)
 
 
+# CNI指数缓存
+_cni_cache = {}
+
+
+def fetch_cni_index_data(index_code):
+    """获取国证指数PE和均线偏离数据（PE越低+指数低于MA=越便宜）"""
+    if index_code in _cni_cache:
+        return _cni_cache[index_code]
+
+    ak = get_akshare()
+    if not ak:
+        _cni_cache[index_code] = None
+        return None
+
+    try:
+        all_idx = ak.index_all_cni()
+        row = all_idx[all_idx["指数代码"] == index_code]
+        if row.empty:
+            _cni_cache[index_code] = None
+            return None
+        row = row.iloc[0]
+        pe = row.get("PE滚动")
+        if pe is None or (hasattr(pe, '__iter__') and not pe) or pe != pe:  # NaN check
+            _cni_cache[index_code] = None
+            return None
+        pe = float(pe)
+        if pe <= 0:
+            _cni_cache[index_code] = None
+            return None
+        current_level = float(row["收盘点位"])
+
+        hist = ak.index_hist_cni(symbol=index_code)
+        closes = [float(x) for x in hist["收盘价"].tolist()]
+        if len(closes) < 60:
+            _cni_cache[index_code] = None
+            return None
+        ma60 = sum(closes[-60:]) / 60
+        diff_pct = round((current_level - ma60) / ma60 * 100, 2)
+
+        result = {
+            "pe": round(pe, 2),
+            "index_level": round(current_level, 2),
+            "ma60": round(ma60, 2),
+            "diff_pct": diff_pct,
+        }
+        _cni_cache[index_code] = result
+        return result
+    except Exception as e:
+        print(f"  获取CNI指数{index_code}数据失败: {e}")
+        _cni_cache[index_code] = None
+        return None
+
+
+def calc_effective_from_pe(pe, index_diff_pct):
+    """PE盈利率 + 指数均线偏离 → 有效收益率"""
+    if pe is None or pe <= 0:
+        return None
+    earnings_yield = 1.0 / pe * 100
+    # 指数低于MA时放大有效收益率，高于时不变
+    adjustment = 1.0 + max(0, -index_diff_pct) / 100
+    return round(earnings_yield * adjustment, 1)
+
+
 def fetch_fund_nav(code):
     """获取场外基金净值历史（最近80个交易日），返回净值列表（从旧到新）"""
     JZ_URL = "https://api.fund.eastmoney.com/f10/lsjz"
@@ -333,7 +396,7 @@ def fetch_fund_nav(code):
     return navs
 
 
-def analyze(closes, fund, valuation=None):
+def analyze(closes, fund, valuation=None, cni_data=None):
     """股息率择时：便宜时提示一次性买入，不便宜时等待"""
     if len(closes) < 60:
         return {
@@ -355,6 +418,8 @@ def analyze(closes, fund, valuation=None):
     if yld is not None:
         hist_yield = valuation.get("hist_yield") if valuation else None
         effective = calc_effective_yield(yld, hist_yield)
+    elif cni_data is not None:
+        effective = calc_effective_from_pe(cni_data["pe"], cni_data["diff_pct"])
     else:
         effective = None
 
@@ -372,11 +437,12 @@ def analyze(closes, fund, valuation=None):
         "action": action,
         "action_color": color,
         "valuation": valuation,
+        "cni_data": cni_data,
     }
 
 
 def check_fund(fund):
-    """检查单个基金 - ETF分红反推股息率，无数据时回退均线"""
+    """检查单个基金 - ETF分红反推股息率，无数据时回退CNI指数PE"""
     fund_type = fund.get("type", "etf")
 
     # 股息率来源：优先用yield_etf反推（含历史中位），其次蛋卷index_name
@@ -387,13 +453,19 @@ def check_fund(fund):
         index_name = fund.get("index_name")
         valuation = fetch_index_valuation(index_name) if index_name else None
 
+    # CNI指数数据（PE+均线，作为股息率缺失时的替代）
+    cni_data = None
+    index_code = fund.get("index_code")
+    if index_code:
+        cni_data = fetch_cni_index_data(index_code)
+
     if fund_type == "fund":
         navs = fetch_fund_nav(fund["code"])
-        return analyze(navs, fund, valuation)
+        return analyze(navs, fund, valuation, cni_data)
     else:
         klines = fetch_kline(fund)
         closes = parse_kline(klines)
-        return analyze(closes, fund, valuation)
+        return analyze(closes, fund, valuation, cni_data)
 
 
 def send_pushplus(title, content):
@@ -484,10 +556,15 @@ def send_wecom(title, results):
                     eff_str = f" 有效: {effective}" if effective is not None else ""
                     val_info = f"\n> 股息率: **{yld}%**{hist_str} {level}{eff_str}{pe_pb}"
 
+            cni_info = ""
+            if r.get("cni_data"):
+                c = r["cni_data"]
+                cni_info = f"\n> PE: {c['pe']} 盈利率: {round(1/c['pe']*100,1)}% 指数MA60偏离: {c['diff_pct']}%"
+
             ma_str = f"\n> MA20: {r['ma20']} 偏离: {r['diff_pct']}%"
             lines.append(
                 f"**{name}({code})**\n"
-                f"> {status}{ma_str}{val_info}\n"
+                f"> {status}{ma_str}{cni_info}{val_info}\n"
             )
 
     lines.append(f"---\n> 股息率相对历史越高越便宜 | 便宜时买入 | 不便宜时等待")
@@ -567,8 +644,13 @@ def build_message(results):
                     eff_str = f" 有效: {effective}" if effective is not None else ""
                     val_html = f"<br>股息率: <b>{yld}%</b>{hist_str}({level}){eff_str}{pe_pb}"
 
+            cni_html = ""
+            if r.get("cni_data"):
+                c = r["cni_data"]
+                cni_html = f"<br>PE: {c['pe']} 盈利率: {round(1/c['pe']*100,1)}% 指数MA60偏离: {c['diff_pct']}%"
+
             ma_str = f"<br>MA20: {r['ma20']} 偏离: {r['diff_pct']}%"
-            detail = f"{ma_str}{val_html}"
+            detail = f"{ma_str}{cni_html}{val_html}"
 
         lines.append(f"<p><b>{name}({code})</b> - {status}{detail}</p>")
 
