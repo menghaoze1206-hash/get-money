@@ -23,16 +23,15 @@ USER_AGENT = (
 )
 
 # 监控的基金列表
-# thresholds: (轻仓阈值%, 建议买入阈值%, 重仓阈值%或None)
 WATCH_FUNDS = [
     # ETF（场内基金）- 使用K线数据
     {"name": "红利低波ETF", "code": "512890", "market": "1",
-     "thresholds": (1.0, 1.8, None), "index_name": "红利低波"},
+     "index_name": "红利低波"},
     {"name": "自由现金流ETF", "code": "159201", "market": "0",
      "yield_etf": "159201", "index_code": "980092"},
     # 场外基金 - 使用净值数据
     {"name": "南方红利低波联接A", "code": "008163", "type": "fund",
-     "thresholds": (1.0, 1.8, None), "index_name": "标普红利"},
+     "index_name": "标普红利"},
 ]
 
 # 通知方式配置
@@ -73,7 +72,7 @@ def get_akshare():
 
 
 def fetch_kline(fund):
-    """获取基金/ETF的K线数据（最近80个交易日，用于计算MA20和MA60）"""
+    """获取基金/ETF的K线数据（最近80个交易日，用于展示MA偏离）"""
     code = fund["code"]
     ak = get_akshare()
 
@@ -138,6 +137,21 @@ def buy_signal(effective):
     else:
         return ("#999999", "继续等待")
 
+
+def valuation_level(effective):
+    """有效股息率 → 估值水平标签"""
+    if effective is None:
+        return ""
+    if effective < 5.0:
+        return "偏贵"
+    elif effective < 6.0:
+        return "合理"
+    elif effective < 7.0:
+        return "略便宜"
+    elif effective < 8.0:
+        return "便宜"
+    else:
+        return "很便宜"
 
 
 # 估值缓存（同一次运行内复用）
@@ -411,7 +425,6 @@ def analyze(closes, fund, valuation=None, cni_data=None):
     ma60 = calc_ma(closes, 60)
 
     diff_pct = (current_price - ma20) / ma20 * 100
-    trend_up = current_price > ma60
 
     # 股息率择时：有效股息率>=6买入，>=8大举买入
     yld = valuation.get("yield_pct") if valuation else None
@@ -432,7 +445,6 @@ def analyze(closes, fund, valuation=None, cni_data=None):
         "ma20": round(ma20, 3),
         "ma60": round(ma60, 3),
         "diff_pct": round(diff_pct, 2),
-        "trend_up": trend_up,
         "effective": effective,
         "action": action,
         "action_color": color,
@@ -538,19 +550,7 @@ def send_wecom(title, results):
                 yld = v["yield_pct"]
                 if yld is not None:
                     hist = v.get("hist_yield")
-                    if effective is not None:
-                        if effective < 5.0:
-                            level = "偏贵"
-                        elif effective < 6.0:
-                            level = "合理"
-                        elif effective < 7.0:
-                            level = "略便宜"
-                        elif effective < 8.0:
-                            level = "便宜"
-                        else:
-                            level = "很便宜"
-                    else:
-                        level = ""
+                    level = valuation_level(effective)
                     hist_str = f"（历史中位{hist}%）" if hist else ""
                     pe_pb = f"  PE: {v['pe']}  PB: {v['pb']}" if "pe" in v else ""
                     eff_str = f" 有效: {effective}" if effective is not None else ""
@@ -626,19 +626,7 @@ def build_message(results):
                 yld = v["yield_pct"]
                 if yld is not None:
                     hist = v.get("hist_yield")
-                    if effective is not None:
-                        if effective < 5.0:
-                            level = "偏贵"
-                        elif effective < 6.0:
-                            level = "合理"
-                        elif effective < 7.0:
-                            level = "略便宜"
-                        elif effective < 8.0:
-                            level = "便宜"
-                        else:
-                            level = "很便宜"
-                    else:
-                        level = ""
+                    level = valuation_level(effective)
                     hist_str = f"（历史中位{hist}%）" if hist else ""
                     pe_pb = f"  PE: {v['pe']}  PB: {v['pb']}" if "pe" in v else ""
                     eff_str = f" 有效: {effective}" if effective is not None else ""
