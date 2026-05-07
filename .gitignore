@@ -3,5 +3,6 @@ __pycache__/
 *.pyc
 .DS_Store
 data/*.log
+data/*.db*
 opencode.json
 a.scpt

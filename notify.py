@@ -5,6 +5,7 @@ import json
 import os
 import re
 import sys
+from calendar import monthrange
 from datetime import datetime, timedelta, timezone
 
 # 北京时间
@@ -17,10 +18,12 @@ from pathlib import Path
 from urllib import error, parse, request
 
 BASE_DIR = Path(__file__).resolve().parent
+sys.path.insert(0, str(BASE_DIR))
 USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0 Safari/537.36"
 )
+INVEST_STEP = 50
 
 # 监控的基金列表
 WATCH_FUNDS = [
@@ -126,32 +129,92 @@ def calc_ma(closes, n=20):
     return sum(closes[-n:]) / n
 
 
-def buy_signal(effective):
-    """根据有效股息率判断买入机会"""
+def round_invest_amount(amount, step=INVEST_STEP):
+    """把投入金额取整到易执行的金额，如 50、100、150。"""
+    if amount is None or amount <= 0:
+        return 0
+    return max(step, int(round(amount / step)) * step)
+
+
+def month_workdays(day=None):
+    """用本月工作日近似交易日；不额外接入节假日日历。"""
+    day = day or now_beijing().date()
+    _, days = monthrange(day.year, day.month)
+    return sum(
+        1
+        for d in range(1, days + 1)
+        if datetime(day.year, day.month, d).weekday() < 5
+    )
+
+
+def get_monthly_budget_setting():
+    """月投入预算：优先环境变量，其次读取本地 Web 面板设置。"""
+    env_budget = os.environ.get("MONTHLY_INVEST_BUDGET")
+    if env_budget:
+        try:
+            return max(0, int(float(env_budget)))
+        except ValueError:
+            pass
+    try:
+        from backend.database import get_monthly_budget
+        return get_monthly_budget()
+    except Exception:
+        return 0
+
+
+def build_investment_plan(monthly_budget=None):
+    if monthly_budget is None:
+        monthly_budget = get_monthly_budget_setting()
+    workdays = month_workdays()
+    daily_raw = monthly_budget / workdays if monthly_budget and workdays else 0
+    return {
+        "monthly_budget": monthly_budget,
+        "workdays": workdays,
+        "daily_base_amount": round_invest_amount(daily_raw),
+    }
+
+
+# 信号分档 (threshold, multiplier, color, action_label, valuation_label)
+SIGNAL_TIERS = [
+    (8.0, 5.0, "#ff0000", "🔥 大举买入 5x", "很便宜"),
+    (7.0, 3.0, "#ff6600", "加码定投 3x", "便宜"),
+    (6.0, 2.0, "#e67e22", "加倍定投 2x", "略便宜"),
+    (5.0, 1.0, "#27ae60", "正常定投 1x", "合理"),
+    (4.0, 0.5, "#3498db", "减少定投 0.5x", "偏贵"),
+]
+
+
+def _lookup_tier(effective):
+    """查找有效股息率对应的分档"""
     if effective is None:
-        return ("#999999", "无法判断")
-    if effective >= 8.0:
-        return ("#ff0000", "🔥 大举买入")
-    elif effective >= 6.0:
-        return ("#ff6600", "买入机会")
-    else:
-        return ("#999999", "继续等待")
+        return None
+    for tier in SIGNAL_TIERS:
+        if effective >= tier[0]:
+            return tier
+    return None
+
+
+def dca_multiplier(effective):
+    if effective is None:
+        return None
+    tier = _lookup_tier(effective)
+    return tier[1] if tier else 0.0
+
+
+def buy_signal(effective):
+    if effective is None:
+        return ("#999999", "无法判断", None)
+    tier = _lookup_tier(effective)
+    if tier:
+        return (tier[2], tier[3], tier[1])
+    return ("#999999", "暂停定投", 0.0)
 
 
 def valuation_level(effective):
-    """有效股息率 → 估值水平标签"""
     if effective is None:
         return ""
-    if effective < 5.0:
-        return "偏贵"
-    elif effective < 6.0:
-        return "合理"
-    elif effective < 7.0:
-        return "略便宜"
-    elif effective < 8.0:
-        return "便宜"
-    else:
-        return "很便宜"
+    tier = _lookup_tier(effective)
+    return tier[4] if tier else "很贵"
 
 
 # 估值缓存（同一次运行内复用）
@@ -159,7 +222,6 @@ _val_cache = {}
 
 
 def fetch_index_valuation(index_name):
-    """从蛋卷基金获取指数PE/股息率估值数据"""
     if index_name in _val_cache:
         return _val_cache[index_name]
 
@@ -175,18 +237,14 @@ def fetch_index_valuation(index_name):
         items = data.get("data", {}).get("items", [])
         for item in items:
             name = item.get("name", "")
-            if name == index_name:
-                result = {
-                    "pe": item.get("pe"),
-                    "pb": item.get("pb"),
-                    "yield_pct": round(item.get("yeild", 0) * 100, 2),
-                    "pe_pct": item.get("pe_percentile"),
-                    "pb_pct": item.get("pb_percentile"),
-                }
-                _val_cache[index_name] = result
-                return result
-        _val_cache[index_name] = None
-        return None
+            _val_cache[name] = {
+                "pe": item.get("pe"),
+                "pb": item.get("pb"),
+                "yield_pct": round(item.get("yeild", 0) * 100, 2),
+                "pe_pct": item.get("pe_percentile"),
+                "pb_pct": item.get("pb_percentile"),
+            }
+        return _val_cache.get(index_name)
     except Exception as e:
         print(f"  获取{index_name}估值失败: {e}")
         _val_cache[index_name] = None
@@ -410,8 +468,7 @@ def fetch_fund_nav(code):
     return navs
 
 
-def analyze(closes, fund, valuation=None, cni_data=None):
-    """股息率择时：便宜时提示一次性买入，不便宜时等待"""
+def analyze(closes, fund, valuation=None, cni_data=None, investment_plan=None):
     if len(closes) < 60:
         return {
             "name": fund["name"],
@@ -426,7 +483,6 @@ def analyze(closes, fund, valuation=None, cni_data=None):
 
     diff_pct = (current_price - ma20) / ma20 * 100
 
-    # 股息率择时：有效股息率>=6买入，>=8大举买入
     yld = valuation.get("yield_pct") if valuation else None
     if yld is not None:
         hist_yield = valuation.get("hist_yield") if valuation else None
@@ -436,7 +492,13 @@ def analyze(closes, fund, valuation=None, cni_data=None):
     else:
         effective = None
 
-    color, action = buy_signal(effective)
+    color, action, multiplier = buy_signal(effective)
+    daily_base_amount = (investment_plan or {}).get("daily_base_amount") or 0
+    suggested_amount = (
+        round_invest_amount(daily_base_amount * multiplier)
+        if multiplier is not None and daily_base_amount
+        else None
+    )
 
     return {
         "name": fund["name"],
@@ -446,6 +508,11 @@ def analyze(closes, fund, valuation=None, cni_data=None):
         "ma60": round(ma60, 3),
         "diff_pct": round(diff_pct, 2),
         "effective": effective,
+        "dca_multiplier": multiplier,
+        "monthly_budget": (investment_plan or {}).get("monthly_budget"),
+        "workdays": (investment_plan or {}).get("workdays"),
+        "daily_base_amount": daily_base_amount or None,
+        "suggested_amount": suggested_amount,
         "action": action,
         "action_color": color,
         "valuation": valuation,
@@ -453,7 +520,7 @@ def analyze(closes, fund, valuation=None, cni_data=None):
     }
 
 
-def check_fund(fund):
+def check_fund(fund, investment_plan=None):
     """检查单个基金 - ETF分红反推股息率，无数据时回退CNI指数PE"""
     fund_type = fund.get("type", "etf")
 
@@ -473,21 +540,22 @@ def check_fund(fund):
 
     if fund_type == "fund":
         navs = fetch_fund_nav(fund["code"])
-        return analyze(navs, fund, valuation, cni_data)
+        return analyze(navs, fund, valuation, cni_data, investment_plan)
     else:
         klines = fetch_kline(fund)
         closes = parse_kline(klines)
-        return analyze(closes, fund, valuation, cni_data)
+        return analyze(closes, fund, valuation, cni_data, investment_plan)
 
 
-def send_pushplus(title, content):
+def send_pushplus(title, content, pushplus_token=None):
     """通过 PushPlus 发送微信通知"""
-    if not PUSHPLUS_TOKEN:
-        print("错误: 未设置 PUSHPLUS_TOKEN 环境变量")
+    token = pushplus_token or PUSHPLUS_TOKEN
+    if not token:
+        print("错误: 未设置 PUSHPLUS_TOKEN")
         return False
     
     payload = {
-        "token": PUSHPLUS_TOKEN,
+        "token": token,
         "title": title,
         "content": content,
         "template": "html",
@@ -518,17 +586,25 @@ def send_pushplus(title, content):
         return False
 
 
-def send_wecom(title, results):
+def send_wecom(title, results, wecom_key=None):
     """通过企业微信机器人发送通知"""
-    if not WECOM_KEY:
-        print("错误: 未设置 WECOM_KEY 环境变量")
+    key = wecom_key or WECOM_KEY
+    if not key:
+        print("错误: 未设置 WECOM_KEY")
         return False
 
     now = now_beijing().strftime("%Y-%m-%d %H:%M")
 
     # 构建 markdown 消息
     lines = [f"## 股息率买入信号 - {now}\n"]
-    lines.append("> 股息率便宜时一次性买入，不便宜时继续等待\n")
+    lines.append("> 定投打底 + 股息率加速：便宜时加码，贵时减少/暂停\n")
+    plan = next((r for r in results if r.get("daily_base_amount")), None)
+    if plan:
+        lines.append(
+            f"> 月预算: **{plan['monthly_budget']}元** "
+            f"本月交易日(估): {plan['workdays']}天 "
+            f"基础日投: **{plan['daily_base_amount']}元**\n"
+        )
 
     for r in results:
         name = r["name"]
@@ -541,8 +617,14 @@ def send_wecom(title, results):
             action = r.get("action", "")
             action_color = r.get("action_color", "#666666")
             effective = r.get("effective")
+            suggested_amount = r.get("suggested_amount")
 
             status = f"<font color='{action_color}'>{action}</font>"
+            amount_info = (
+                f"\n> 建议投入: **{suggested_amount}元**"
+                if suggested_amount is not None
+                else ""
+            )
 
             val_info = ""
             if r.get("valuation"):
@@ -564,7 +646,7 @@ def send_wecom(title, results):
             ma_str = f"\n> MA20: {r['ma20']} 偏离: {r['diff_pct']}%"
             lines.append(
                 f"**{name}({code})**\n"
-                f"> {status}{ma_str}{cni_info}{val_info}\n"
+                f"> {status}{amount_info}{ma_str}{cni_info}{val_info}\n"
             )
 
     lines.append(f"---\n> 股息率相对历史越高越便宜 | 便宜时买入 | 不便宜时等待")
@@ -574,7 +656,7 @@ def send_wecom(title, results):
         "markdown": {"content": "\n".join(lines)},
     }
 
-    url = f"{WECOM_WEBHOOK}?key={WECOM_KEY}"
+    url = f"{WECOM_WEBHOOK}?key={key}"
     data = json.dumps(payload).encode("utf-8")
 
     req = request.Request(
@@ -604,7 +686,14 @@ def send_wecom(title, results):
 def build_message(results):
     """构建通知消息（返回 HTML 格式供 PushPlus 使用）"""
     now = now_beijing().strftime("%Y-%m-%d %H:%M")
-    lines = [f"<h3>股息率买入信号 - {now}</h3>", "<p>股息率便宜时一次性买入，不便宜时继续等待</p>", "<hr>"]
+    lines = [f"<h3>股息率买入信号 - {now}</h3>", "<p>定投打底 + 股息率加速：便宜时加码，贵时减少/暂停</p>", "<hr>"]
+    plan = next((r for r in results if r.get("daily_base_amount")), None)
+    if plan:
+        lines.append(
+            f"<p>月预算: <b>{plan['monthly_budget']}元</b> "
+            f"本月交易日(估): {plan['workdays']}天 "
+            f"基础日投: <b>{plan['daily_base_amount']}元</b></p>"
+        )
 
     for r in results:
         name = r["name"]
@@ -618,8 +707,14 @@ def build_message(results):
             action = r.get("action", "")
             action_color = r.get("action_color", "#666666")
             effective = r.get("effective")
+            suggested_amount = r.get("suggested_amount")
 
             status = f"<span style='color:{action_color};font-weight:bold'>{action}</span>"
+            amount_html = (
+                f"<br>建议投入: <b>{suggested_amount}元</b>"
+                if suggested_amount is not None
+                else ""
+            )
             val_html = ""
             if r.get("valuation"):
                 v = r["valuation"]
@@ -638,7 +733,7 @@ def build_message(results):
                 cni_html = f"<br>PE: {c['pe']} 盈利率: {round(1/c['pe']*100,1)}% 指数MA60偏离: {c['diff_pct']}%"
 
             ma_str = f"<br>MA20: {r['ma20']} 偏离: {r['diff_pct']}%"
-            detail = f"{ma_str}{cni_html}{val_html}"
+            detail = f"{amount_html}{ma_str}{cni_html}{val_html}"
 
         lines.append(f"<p><b>{name}({code})</b> - {status}{detail}</p>")
 
@@ -648,41 +743,157 @@ def build_message(results):
     return "\n".join(lines)
 
 
-def send_notification(title, content, results):
-    """根据配置发送通知"""
-    if NOTIFY_TYPE == "wecom":
-        return send_wecom(title, results)
+def send_notification(title, results, wecom_key=None, pushplus_token=None, notify_type=None):
+    ntype = notify_type or NOTIFY_TYPE
+    if ntype == "wecom":
+        return send_wecom(title, results, wecom_key=wecom_key)
     else:
-        return send_pushplus(title, content)
+        return send_pushplus(title, build_message(results), pushplus_token=pushplus_token)
 
 
 def main():
     """主函数"""
     print(f"开始检查股息率买入信号... {now_beijing().strftime('%Y-%m-%d %H:%M:%S')}")
 
+    # 尝试从数据库获取多用户数据
+    users_data = _load_users_from_db()
+
+    if users_data:
+        _run_multi_user(users_data)
+    else:
+        _run_single_user()
+
+    print("检查完成")
+
+
+def _load_users_from_db():
+    """从 SQLite 加载所有用户及其基金配置。无用户时返回 []。"""
+    try:
+        from backend.database import get_all_users_with_funds
+        return get_all_users_with_funds()
+    except Exception as e:
+        print(f"  加载用户数据失败(将使用单用户模式): {e}")
+        return []
+
+
+def _analyze_fund(fund, investment_plan=None):
+    """分析单个基金，返回结果。错误时返回 reason dict。"""
+    try:
+        return check_fund(fund, investment_plan)
+    except Exception as e:
+        return {
+            "name": fund.get("name", ""),
+            "code": fund.get("code", ""),
+            "effective": None,
+            "reason": f"获取数据失败: {e}",
+        }
+
+
+def _fund_dedup_key(f):
+    return (f["code"], f.get("yield_etf") or "", f.get("index_name") or "", f.get("index_code") or "")
+
+
+def _run_multi_user(users_data):
+    all_fund_configs = {}
+    for ud in users_data:
+        for f in ud["funds"]:
+            key = _fund_dedup_key(f)
+            if key not in all_fund_configs:
+                all_fund_configs[key] = f
+
+    if not all_fund_configs:
+        print("  没有用户配置了基金，跳过分析")
+        return
+
+    print(f"  统一分析 {len(all_fund_configs)} 只唯一基金...")
+    fund_results = {}
+    for key, fund in all_fund_configs.items():
+        result = _analyze_fund(fund)
+        fund_results[key] = result
+        eff = result.get("effective")
+        eff_str = f" eff={eff}" if eff is not None else ""
+        print(f"    {result['name']}({result['code']}): {result.get('action', '')}{eff_str}")
+
+    try:
+        from backend.database import save_run_results
+        all_unique_funds = list(all_fund_configs.values())
+        all_results = list(fund_results.values())
+        save_run_results(all_unique_funds, all_results)
+    except Exception as e:
+        print(f"  数据落盘失败: {e}")
+
+    for ud in users_data:
+        user = ud["user"]
+        user_funds_list = ud["funds"]
+        monthly_budget = ud["monthly_budget"]
+
+        if not user_funds_list:
+            continue
+
+        plan = build_investment_plan(monthly_budget)
+
+        user_results = []
+        for f in user_funds_list:
+            r = fund_results.get(_fund_dedup_key(f))
+            if r is None:
+                continue
+            r_copy = dict(r)
+            multiplier = r.get("dca_multiplier")
+            daily_base = plan["daily_base_amount"]
+            r_copy["monthly_budget"] = plan["monthly_budget"]
+            r_copy["workdays"] = plan["workdays"]
+            r_copy["daily_base_amount"] = daily_base or None
+            r_copy["suggested_amount"] = (
+                round_invest_amount(daily_base * multiplier)
+                if multiplier is not None and daily_base
+                else None
+            )
+            user_results.append(r_copy)
+
+        if not user_results:
+            continue
+
+        username = user.get("username", user.get("id", "?"))
+        print(f"\n  为用户 {username} 推送通知"
+              f"（{len(user_results)}只基金, 月预算={monthly_budget}元）")
+
+        title = f"股息率买入信号 - {now_beijing().strftime('%m月%d日')}"
+        send_notification(
+            title, user_results,
+            wecom_key=user.get("wecom_key"),
+            pushplus_token=user.get("pushplus_token"),
+            notify_type=user.get("notify_type"),
+        )
+
+
+def _run_single_user():
+    """单用户模式（兼容旧版：使用 WATCH_FUNDS + 环境变量）"""
+    investment_plan = build_investment_plan()
+    if investment_plan["monthly_budget"]:
+        print(
+            f"  月预算={investment_plan['monthly_budget']}元 "
+            f"本月交易日(估)={investment_plan['workdays']} "
+            f"基础日投={investment_plan['daily_base_amount']}元"
+        )
+
     results = []
     for fund in WATCH_FUNDS:
-        try:
-            result = check_fund(fund)
-            results.append(result)
-            eff = result.get("effective")
-            eff_str = f" eff={eff}" if eff is not None else ""
-            print(f"  {result['name']}({result['code']}): {result.get('action', '')}{eff_str}")
-        except Exception as e:
-            print(f"  检查 {fund['name']}({fund['code']}) 失败: {e}")
-            results.append({
-                "name": fund["name"],
-                "code": fund["code"],
-                "effective": None,
-                "reason": f"获取数据失败: {e}",
-            })
+        result = _analyze_fund(fund, investment_plan)
+        results.append(result)
+        eff = result.get("effective")
+        eff_str = f" eff={eff}" if eff is not None else ""
+        amount = result.get("suggested_amount")
+        amount_str = f" amount={amount}元" if amount is not None else ""
+        print(f"  {result['name']}({result['code']}): {result.get('action', '')}{eff_str}{amount_str}")
 
-    # 构建并发送通知
     title = f"股息率买入信号 - {now_beijing().strftime('%m月%d日')}"
-    content = build_message(results)
+    send_notification(title, results)
 
-    send_notification(title, content, results)
-    print("检查完成")
+    try:
+        from backend.database import save_run_results
+        save_run_results(WATCH_FUNDS, results)
+    except Exception as e:
+        print(f"数据落盘失败: {e}")
 
 
 if __name__ == "__main__":
